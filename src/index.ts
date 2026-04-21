@@ -1,4 +1,7 @@
 export * from "./context/index.js";
+export * from "./gateway/index.js";
+export * from "./storage/index.js";
+export * from "./retrieval/index.js";
 export * from "./demo.js";
 export * from "./factory.js";
 export * from "./policy/index.js";

@@ -79,7 +79,22 @@ export class AgentRuntime {
     appendMessage(this.state, userMessage);
 
     await this.emit({ type: "loop_start" });
+    this.state.signal = "continue";
+    return this.runLoop();
+  }
 
+  public approvePendingTool(): void {
+    setPendingApproval(this.state, null);
+    this.state.signal = "continue";
+    this.state.lastResponseType = "none";
+  }
+
+  public async resume(): Promise<AgentState> {
+    if (this.state.signal !== "continue") return this.state;
+    return this.runLoop();
+  }
+
+  private async runLoop(): Promise<AgentState> {
     while (this.state.signal !== "stop") {
       this.state.iteration += 1;
       await this.emit({ type: "iteration_start", iteration: this.state.iteration });
@@ -119,11 +134,7 @@ export class AgentRuntime {
 
       if (turn.type === "text") {
         const text = turn.text ?? "";
-        const assistantMessage: AssistantMessage = {
-          id: messageId(),
-          role: "assistant",
-          content: text,
-        };
+        const assistantMessage: AssistantMessage = { id: messageId(), role: "assistant", content: text };
         appendMessage(this.state, assistantMessage);
         this.state.lastResponseType = "text";
         this.state.lastTextResponse = text;
@@ -156,12 +167,6 @@ export class AgentRuntime {
     }
 
     return this.state;
-  }
-
-  public approvePendingTool(): void {
-    setPendingApproval(this.state, null);
-    this.state.signal = "continue";
-    this.state.lastResponseType = "none";
   }
 
   private async executeToolCalls(toolCalls: ToolCall[]): Promise<"continue" | "pending_approval"> {
