@@ -1,4 +1,4 @@
-# Titanclaw-ts
+# TitanX
 
 [English](./README.md) | **中文**
 

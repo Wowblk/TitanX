@@ -1,9 +1,9 @@
 {
-  "name": "titanclaw-ts",
+  "name": "titanx",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "TypeScript runtime prototype for Titanclaw",
+  "description": "TypeScript Agent SDK for TitanX",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit -p tsconfig.json",
