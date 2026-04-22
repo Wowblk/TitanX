@@ -2,7 +2,7 @@
 
 TitanX is a Python Agent SDK for building autonomous agents with explicit runtime semantics, multi-layer safety, policy controls, context compaction, and sandboxed tool execution.
 
-This repository now tracks the Python implementation. The previous TypeScript implementation remains available in Git history.
+This repository now tracks the Python implementation. The previous TypeScript implementation is kept next to it as `../TitanX-ts/` for reference.
 
 ## Quick Start
 
