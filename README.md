@@ -1,6 +1,8 @@
-# TitanX
+# TitanX-ts
 
 **English** | [中文](./README.zh.md)
+
+The TypeScript reference implementation of TitanX, kept for comparison with the primary Python project in `../TitanX/`.
 
 A TypeScript Agent SDK with explicit runtime semantics, multi-layer security, and sandboxed tool execution. Not built on LangGraph — the loop, state, and safety boundaries are all plain code.
 

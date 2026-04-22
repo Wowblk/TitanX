@@ -1,6 +1,8 @@
-# TitanX
+# TitanX-ts
 
 [English](./README.md) | **中文**
+
+TitanX 的 TypeScript 参考实现，用来和主项目 `../TitanX/` 的 Python 版本进行对照。
 
 具备显式运行时语义、多层安全防护与沙箱工具执行能力的 TypeScript Agent SDK。不依赖 LangGraph —— 循环、状态与安全边界均为纯代码实现。
 

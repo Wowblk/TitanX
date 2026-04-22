@@ -1,9 +1,9 @@
 {
-  "name": "titanx",
+  "name": "titanx-ts",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "TypeScript Agent SDK for TitanX",
+  "description": "TypeScript reference implementation for TitanX",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit -p tsconfig.json",
