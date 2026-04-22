@@ -16,6 +16,7 @@ class ToolDefinition:
     parameters: dict[str, Any]
     requires_approval: bool = False
     requires_sanitization: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

@@ -13,6 +13,14 @@ from .resilience import CircuitBreaker, ResilientOptions, ResilientSandboxBacken
 from .gateway import GatewayOptions, create_gateway, run_gateway
 from .storage import LibSQLBackend, PgVectorBackend
 from .retrieval import EmbeddingProvider, HybridRetriever
+from .tools import (
+    IRONCLAW_WASM_TOOLS,
+    IronClawWasmToolSpec,
+    WasmCredentialSpec,
+    WasmHttpAllowlist,
+    create_ironclaw_wasm_handlers,
+    get_ironclaw_wasm_tool_specs,
+)
 
 __all__ = [
     "AgentConfig", "AgentState", "LlmAdapter", "LlmTurnResult", "LlmUsage",
@@ -28,4 +36,7 @@ __all__ = [
     "GatewayOptions", "create_gateway", "run_gateway",
     "LibSQLBackend", "PgVectorBackend",
     "EmbeddingProvider", "HybridRetriever",
+    "IRONCLAW_WASM_TOOLS", "IronClawWasmToolSpec",
+    "WasmCredentialSpec", "WasmHttpAllowlist",
+    "create_ironclaw_wasm_handlers", "get_ironclaw_wasm_tool_specs",
 ]

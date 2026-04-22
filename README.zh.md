@@ -35,4 +35,41 @@ python run_gateway.py
 | `titanx/policy/` | 策略存储、审计日志和 break-glass 控制 |
 | `titanx/storage/` | 存储后端接口和实现 |
 | `titanx/retrieval/` | 混合检索和 MMR 排序 |
+| `titanx/tools/` | 可选工具目录，包括参考 IronClaw 的 WASM 工具 |
 | `titanx/gateway/` | FastAPI gateway 和 UI 服务 |
+
+## IronClaw WASM 工具目录
+
+TitanX 内置了一组可选的 IronClaw 风格 WASM 工具定义：`github`、`gmail`、
+`google_calendar`、`google_docs`、`google_drive`、`google_sheets`、
+`google_slides`、`slack`、`telegram_mtproto`、`web_search`、`llm_context`
+和 `composio`。
+
+启用方式：
+
+```python
+from titanx import CreateSandboxedRuntimeOptions, create_sandboxed_runtime
+from titanx.sandbox import WasmCommandRegistration
+
+runtime = create_sandboxed_runtime(CreateSandboxedRuntimeOptions(
+    llm=llm,
+    safety=safety,
+    enable_ironclaw_wasm_tools=True,
+    wasm_commands={
+        # 每个 command 指向一个 TitanX 兼容的 WASI wrapper。
+        "web_search_tool": WasmCommandRegistration(module_path="./wasm/web_search_tool.wasm"),
+        "github_tool": WasmCommandRegistration(module_path="./wasm/github_tool.wasm"),
+    },
+))
+```
+
+这些 handler 使用 `titanx-wasi-json-argv` ABI：TitanX 执行已注册的 WASI
+command，并传入一个 JSON 参数：
+
+```json
+{"tool":"web_search","action":"search","params":{"query":"TitanX"}}
+```
+
+这里没有假设 IronClaw 的 component-model/WIT ABI。要真正运行对应工具，需要把
+工具编译或包装成 TitanX 兼容的 WASI command：读取 `argv[1]`，然后把结果写到
+stdout。

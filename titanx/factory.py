@@ -20,6 +20,7 @@ from .resilience import ResilientOptions, ResilientSandboxBackend
 from .types import ToolDefinition, LlmAdapter, RuntimeHooks, SafetyLayerLike
 from .context.types import CompactionOptions, CompactionStrategy
 from .policy import PolicyStore
+from .tools import create_ironclaw_wasm_handlers
 
 
 @dataclass
@@ -43,6 +44,9 @@ class CreateSandboxedRuntimeOptions:
     max_iterations: int = 10
     auto_approve_tools: bool = False
     hooks: RuntimeHooks | None = None
+    enable_ironclaw_wasm_tools: bool = False
+    ironclaw_wasm_tool_names: list[str] | None = None
+    ironclaw_wasm_command_overrides: dict[str, str] | None = None
 
 
 def _default_handlers() -> list[SandboxedToolHandler]:
@@ -123,9 +127,18 @@ def create_sandboxed_runtime(options: CreateSandboxedRuntimeOptions) -> AgentRun
         options.wasm_commands, options.log_dir, options.cache_dir, options.resilient_options
     )
     router = SandboxRouter(backends)
+    handlers = list(options.tool_handlers or _default_handlers())
+    if options.enable_ironclaw_wasm_tools:
+        handlers.extend(
+            create_ironclaw_wasm_handlers(
+                options.ironclaw_wasm_tool_names,
+                command_overrides=options.ironclaw_wasm_command_overrides,
+            )
+        )
+
     tools = SandboxedToolRuntime(
         router=router,
-        handlers=options.tool_handlers or _default_handlers(),
+        handlers=handlers,
         allowed_write_paths=options.allowed_write_paths,
         policy_store=options.policy_store,
     )

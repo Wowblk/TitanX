@@ -35,7 +35,44 @@ The gateway starts on `http://localhost:3000`.
 | `titanx/policy/` | Policy store, audit log, and break-glass controls |
 | `titanx/storage/` | Storage backend interfaces and implementations |
 | `titanx/retrieval/` | Hybrid retrieval and MMR ranking |
+| `titanx/tools/` | Optional tool catalogs, including IronClaw-inspired WASM tools |
 | `titanx/gateway/` | FastAPI gateway and UI serving |
+
+## IronClaw WASM Tool Catalog
+
+TitanX includes an optional catalog of IronClaw-inspired WASM tools: `github`,
+`gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`,
+`google_slides`, `slack`, `telegram_mtproto`, `web_search`, `llm_context`, and
+`composio`.
+
+Enable the catalog when constructing the runtime:
+
+```python
+from titanx import CreateSandboxedRuntimeOptions, create_sandboxed_runtime
+from titanx.sandbox import WasmCommandRegistration
+
+runtime = create_sandboxed_runtime(CreateSandboxedRuntimeOptions(
+    llm=llm,
+    safety=safety,
+    enable_ironclaw_wasm_tools=True,
+    wasm_commands={
+        # Each command should point to a TitanX-compatible WASI wrapper.
+        "web_search_tool": WasmCommandRegistration(module_path="./wasm/web_search_tool.wasm"),
+        "github_tool": WasmCommandRegistration(module_path="./wasm/github_tool.wasm"),
+    },
+))
+```
+
+The ABI for these handlers is `titanx-wasi-json-argv`: TitanX executes a
+registered WASI command and passes one JSON argument:
+
+```json
+{"tool":"web_search","action":"search","params":{"query":"TitanX"}}
+```
+
+This intentionally does not assume IronClaw's component-model/WIT ABI. To run
+the actual tools, compile or wrap them as TitanX-compatible WASI commands that
+read `argv[1]` and write their result to stdout.
 
 ## Minimal LLM Adapter
 
