@@ -1,3 +1,29 @@
-node_modules/
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
 dist/
-*.wasm
+*.egg-info/
+
+# Legacy local JS artifacts
+node_modules/
+
+# Local config
+.env
+.env.*
