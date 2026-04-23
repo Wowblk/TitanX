@@ -1,20 +1,31 @@
 from __future__ import annotations
 
-import posixpath
 import re
+from pathlib import Path, PurePosixPath
 
-WRITE_TARGET_RE = re.compile(r'(?:>{1,2}|tee(?:\s+-a)?)\s+["\']?(\/[^"\'\\s;|&<>]+)["\']?')
+WRITE_TARGET_RE = re.compile(r'(?:>{1,2}|tee(?:\s+-a)?)\s+["\']?(/[^"\'\s;|&<>]+)["\']?')
 
 
 def is_path_allowed(file_path: str, allowed_paths: list[str]) -> bool:
-    normalized = posixpath.normpath(file_path)
-    if ".." in normalized.split("/"):
+    # Defense in depth: reject traversal syntax before hitting the filesystem.
+    if ".." in PurePosixPath(file_path).parts:
+        return False
+    try:
+        # strict=False so non-existent leaves still normalise; resolve() follows
+        # any symlink along the path, which is what stops the symlink-bypass.
+        resolved = Path(file_path).resolve(strict=False)
+    except (OSError, RuntimeError):
         return False
     for allowed in allowed_paths:
-        norm_allowed = posixpath.normpath(allowed)
-        prefix = norm_allowed if norm_allowed.endswith("/") else norm_allowed + "/"
-        if normalized == norm_allowed or normalized.startswith(prefix):
+        try:
+            resolved_allowed = Path(allowed).resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        try:
+            resolved.relative_to(resolved_allowed)
             return True
+        except ValueError:
+            continue
     return False
 
 
