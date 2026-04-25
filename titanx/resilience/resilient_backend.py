@@ -90,14 +90,22 @@ class ResilientSandboxBackend(SandboxBackend):
         metadata: dict[str, str] | None = None,
         *,
         allowed_write_paths: list[str] | None = None,
+        allowed_read_paths: list[str] | None = None,
+        image_digest: str | None = None,
     ) -> SandboxSession:
         if not hasattr(self._backend, "create_session"):
             raise NotImplementedError(f"{self.kind} does not support sessions")
+        # Only forward the new kwargs when the caller actually set them
+        # so wrapped backends with the legacy 0.2.x signature still
+        # accept the call.
+        kwargs: dict = {"allowed_write_paths": allowed_write_paths}
+        if allowed_read_paths is not None:
+            kwargs["allowed_read_paths"] = allowed_read_paths
+        if image_digest is not None:
+            kwargs["image_digest"] = image_digest
         return await self._breaker.call(
             lambda: with_retry(
-                lambda: self._backend.create_session(
-                    metadata, allowed_write_paths=allowed_write_paths
-                ),
+                lambda: self._backend.create_session(metadata, **kwargs),
                 self._retry_opts,
             )
         )

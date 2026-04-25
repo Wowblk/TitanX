@@ -11,6 +11,55 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Added
 
+- **NemoClaw-parity sandbox hardening** — `AgentPolicy` gains
+  `allowed_read_paths` (host paths the workload may read but not
+  write; bind-mounted `:ro` by `DockerSandboxBackend`) and
+  `image_digest` (OCI digest pin; the Docker backend resolves the
+  configured image and refuses to launch on mismatch via
+  `ImageDigestMismatch`). Both fields are validated by
+  `validate_policy` against the same forbidden subtree list
+  (`/etc`, `/proc`, `/var/run/...`) and surfaced by `audit_policy`.
+- **Per-tool egress rules** — `OutboundRule` gains a `caller`
+  field; `EgressGuard.check`, `check_url`, `check_async`,
+  `check_url_async`, and `enforce` accept a matching `caller`
+  argument. Matching is fail-closed: a rule pinned to
+  `caller="github_tool"` will not match calls that omit the caller.
+  `EgressGuard.from_ironclaw_specs(..., scope_to_caller=True)`
+  pins each generated rule to its spec name (mirrors NemoClaw's
+  `binaries:`).
+- **Auto-injected egress caller** — `titanx.safety.egress.caller_scope`
+  is a `contextvars`-backed scope; `AgentRuntime` wraps every
+  `tools.execute(...)` call in `caller_scope(tool_call.name)` so a
+  tool handler that calls `guard.enforce(url, method)` automatically
+  gets the dispatched tool's identity as the caller. Explicit
+  `caller=` kwargs still win over the ambient binding. The scope
+  propagates into asyncio child tasks (`gather`, `run_in_executor`)
+  but not into raw `threading.Thread` workers (use
+  `contextvars.copy_context()` for those). Exposes
+  `current_caller()` for handlers that want to read the binding
+  directly.
+- **Bundled egress presets** — `titanx.safety.presets` ships
+  default-deny `EgressPolicy` builders for `slack`, `github`,
+  `discord`, `google` (Gmail / Calendar / Drive / Docs / Sheets /
+  Slides + OAuth token endpoint), `huggingface`, `pypi`,
+  `npm_registry`, `brave_search`, `composio`, and `telegram`. Use
+  `presets.compose(["github", "slack"])` to build a guard policy
+  without hand-rolling allowlists.
+- **Audit additions** —
+  - `audit_policy` reports overlap between `allowed_read_paths`
+    and `allowed_write_paths` (the `:ro` mount would shadow the
+    `:rw` mount; the flag builder drops the duplicate so audit
+    surfaces the misconfig early).
+  - `audit_policy` warns when `image_digest` is unset.
+  - `audit_egress_policy` warns when a rule pairs `host_pattern="*"`
+    with `caller=None` (an unintentionally wildcard egress).
+  - New `audit_docker_options` checks that `DockerSandboxBackendOptions`
+    pins the image (either inline `@sha256:` or
+    `expected_image_digest`).
+- **CLI flags** — `python -m titanx.cli audit` accepts
+  `--preset {name|help}` (audit a bundled preset),
+  `--docker-image` and `--docker-image-digest` (audit a Docker
+  backend configuration).
 - **Egress allowlist** — `titanx.safety.egress` (`EgressGuard`,
   `EgressPolicy`, `OutboundRule`, `EgressDenied`,
   `audit_log_egress_hook`). Closes the gap where
@@ -36,6 +85,16 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Changed
 
+- `SandboxBackend.create_session` and `ResilientSandboxBackend.create_session`
+  accept new keyword-only arguments `allowed_read_paths` and
+  `image_digest`. Existing custom backends keep working: the
+  session manager only forwards the new kwargs when the operator
+  actually populated the corresponding policy fields, so backends
+  written against the 0.2.x signature still accept the call.
+- `SandboxExecutionRequest` gains optional `allowed_read_paths` and
+  `image_digest` fields. Tool runtime / session manager
+  late-bind them from the live `AgentPolicy` if the handler did
+  not set them itself.
 - `pyproject.toml` registers a `titanx` console script entry point
   (`titanx.cli:main`).
 

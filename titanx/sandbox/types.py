@@ -21,6 +21,17 @@ class SandboxExecutionRequest:
     # mount overlays for E2B). The host-side PathGuard is defence-in-depth
     # only — this field is the authoritative boundary.
     allowed_write_paths: list[str] | None = None
+    # Absolute host paths the workload may read but never write. Bind-mounted
+    # ``:ro`` by the Docker backend; ignored by backends without a mount
+    # surface (wasm). Mirrors NemoClaw's ``filesystem_policy.read_only``.
+    # ``None`` = caller did not propagate from policy; ``[]`` = no host
+    # reads allowed (the most restrictive setting).
+    allowed_read_paths: list[str] | None = None
+    # Optional OCI image digest the workload must run on. The backend
+    # (Docker) compares this to the resolved image digest before launch
+    # and refuses on mismatch. ``None`` = no pin requested. Set from
+    # ``AgentPolicy.image_digest`` by the tool runtime.
+    image_digest: str | None = None
 
 
 @dataclass
@@ -134,6 +145,8 @@ class SandboxBackend:
         metadata: dict[str, str] | None = None,
         *,
         allowed_write_paths: list[str] | None = None,
+        allowed_read_paths: list[str] | None = None,
+        image_digest: str | None = None,
     ) -> SandboxSession:
         raise NotImplementedError
 

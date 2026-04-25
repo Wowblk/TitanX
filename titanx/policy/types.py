@@ -29,6 +29,24 @@ class AgentPolicy:
     max_iterations: int = 10
     # Tools listed here are unconditionally denied even when auto_approve_tools=True.
     tool_denylist: list[str] = field(default_factory=list)
+    # Paths the sandbox may *read* but never write. Validated by the same
+    # ``validate_write_path`` rules (no privileged subtrees, normalised,
+    # absolute) — host /etc, /proc, /sys etc. stay forbidden because
+    # mounting them into the container is a host-side leak even when
+    # mounted read-only. Empty list means "no host-side reads beyond the
+    # container image" which is the most restrictive setting and the
+    # default. Backends that don't model read-only mounts (e.g. wasm)
+    # are free to ignore this list. NemoClaw's filesystem_policy splits
+    # read_only and read_write — this field is the TitanX equivalent.
+    allowed_read_paths: list[str] = field(default_factory=list)
+    # OCI image digest pin (``sha256:...``) for sandbox backends that
+    # launch a container image. When set, the Docker backend refuses to
+    # start unless the resolved image digest matches. Without this, a
+    # registry compromise or a ``:latest`` force-push silently swaps the
+    # image under the agent. NemoClaw's blueprint pins the sandbox image
+    # the same way; this brings the SDK to parity. ``None`` (default)
+    # disables the check; the audit CLI flags policies without a pin.
+    image_digest: str | None = None
 
 
 @dataclass

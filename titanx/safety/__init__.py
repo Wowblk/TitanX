@@ -11,7 +11,10 @@ from .egress import (
     EgressPolicy,
     OutboundRule,
     audit_log_egress_hook,
+    caller_scope,
+    current_caller,
 )
+from . import presets
 
 __all__ = [
     "DEFAULT_INJECTION_PATTERNS",
@@ -30,4 +33,7 @@ __all__ = [
     "EgressPolicy",
     "OutboundRule",
     "audit_log_egress_hook",
+    "caller_scope",
+    "current_caller",
+    "presets",
 ]

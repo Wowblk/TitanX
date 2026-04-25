@@ -47,8 +47,25 @@ that defeats one of these without operator complicity is in scope.
 3. **PolicyStore validation** (`titanx/policy/validation.py`).
    `validate_policy` rejects any `AgentPolicy` that would let the Docker
    sandbox bind-mount a privileged path (`/`, `/etc`, `/proc`, `/var/run`,
-   `/var/lib/docker`, etc.). Defense-in-depth: the Docker backend
-   re-validates the same paths at the kernel-mount boundary.
+   `/var/lib/docker`, etc.). The same forbidden list applies to
+   `allowed_read_paths` — read-only mounts of host config / state are
+   still leaks, so they are blocked at the same boundary. Defense-in-depth:
+   the Docker backend re-validates the same paths at the kernel-mount
+   boundary.
+3a. **OCI image-digest pin** (`AgentPolicy.image_digest`,
+    `DockerSandboxBackendOptions.expected_image_digest`,
+    `ImageDigestMismatch`).
+    When set, `DockerSandboxBackend` resolves the configured image
+    via `docker inspect` (or an injected resolver) before launch and
+    refuses to start on mismatch. A `repo@sha256:` reference embedded
+    in the image string short-circuits the inspect (Docker enforces
+    the match itself). Sessions are verified at creation time so a
+    long-lived container cannot survive a registry compromise.
+3b. **Read / write mount split** (`AgentPolicy.allowed_read_paths`).
+    Host paths can be exposed `:ro` without granting writability,
+    matching NemoClaw's `filesystem_policy.read_only`. Backends without
+    a mount surface (wasm) ignore the list; the audit module flags
+    overlap between `allowed_read_paths` and `allowed_write_paths`.
 4. **Sandbox isolation floor** (`SandboxRouter.select(min_isolation=…)`).
    When a tool requires a minimum isolation tier and no available backend
    meets it, `select` raises rather than silently downgrading.
@@ -75,6 +92,19 @@ that defeats one of these without operator complicity is in scope.
    which enforces `IronClawWasmToolSpec.http_allowlist` against the
    actual destination host, port, scheme, and path. Default action is
    **deny**.
+9a. **Per-tool egress scoping** (`OutboundRule.caller`,
+    `EgressGuard.from_ironclaw_specs(scope_to_caller=True)`,
+    `caller_scope`).
+    A rule may pin to a specific tool / handler identity; the guard
+    fail-closed when the caller is missing or differs, so a privileged
+    egress rule cannot be inherited by generic code paths. The runtime
+    binds the dispatched tool's name as the ambient caller around every
+    `tools.execute(...)` via the `contextvars`-backed `caller_scope`,
+    so handler code that omits `caller=` still gets correctly scoped
+    decisions. The bundled `titanx.safety.presets` (`slack`, `github`,
+    `discord`, `google`, `huggingface`, `pypi`, `npm_registry`,
+    `brave_search`, `composio`, `telegram`) ship caller-scoped
+    allowlists out of the box.
 10. **Bounded session map** (`SessionRegistry`).
     LRU + idle-TTL caps the in-memory session dict; an unauthenticated WS
     client cannot pin memory.

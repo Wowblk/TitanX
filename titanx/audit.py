@@ -211,6 +211,66 @@ def audit_policy(policy: AgentPolicy) -> AuditReport:
             ),
             fix_hint="Most workflows fit in <50 iterations.",
         ))
+
+    # allowed_read_paths — emptiness is the safe default but worth
+    # flagging the overlap case where an entry is in both read and
+    # write. The Docker backend silently drops the duplicate read mount
+    # but that's not obvious from the policy's static shape.
+    read_paths = list(getattr(policy, "allowed_read_paths", []))
+    if read_paths:
+        write_set = set(policy.allowed_write_paths)
+        overlap = sorted(p for p in read_paths if p in write_set)
+        if overlap:
+            report.add(AuditFinding(
+                check_id="policy.read_write_overlap",
+                severity="warn",
+                title=(
+                    f"{len(overlap)} path(s) appear in both "
+                    f"allowed_read_paths and allowed_write_paths"
+                ),
+                detail=(
+                    "The Docker backend drops the read mount when an "
+                    "entry is also writable; the listing is misleading. "
+                    "Overlap: " + ", ".join(overlap)
+                ),
+                fix_hint=(
+                    "Remove the duplicates from allowed_read_paths — "
+                    "writable already implies readable."
+                ),
+            ))
+        else:
+            report.add(AuditFinding(
+                check_id="policy.allowed_read_paths.set",
+                severity="ok",
+                title=f"allowed_read_paths has {len(read_paths)} entries",
+                detail=", ".join(read_paths),
+            ))
+
+    # image_digest — absence is the realistic default for dev but a
+    # production blueprint should always pin the sandbox image digest.
+    digest = getattr(policy, "image_digest", None)
+    if digest:
+        report.add(AuditFinding(
+            check_id="policy.image_digest.set",
+            severity="ok",
+            title="image_digest pinned",
+            detail=f"Sandbox image must resolve to {digest}.",
+        ))
+    else:
+        report.add(AuditFinding(
+            check_id="policy.image_digest.unset",
+            severity="warn",
+            title="image_digest is not pinned",
+            detail=(
+                "Without a digest pin, a registry compromise or a "
+                "force-push to a tag silently swaps the sandbox image. "
+                "NemoClaw blueprints always pin to sha256."
+            ),
+            fix_hint=(
+                "Set AgentPolicy(image_digest='sha256:<hex>') matching "
+                "the digest of the deployed sandbox image."
+            ),
+        ))
     return report
 
 
@@ -398,6 +458,70 @@ def audit_audit_log_path(log_path: str | None) -> AuditReport:
     return report
 
 
+def audit_docker_options(opts: Any) -> AuditReport:
+    """Audit the Docker backend's image-pin posture.
+
+    Accepts ``DockerSandboxBackendOptions`` (or any object with the same
+    attributes) and reports on three properties of the image:
+
+    - the image string contains an ``@sha256:...`` digest reference;
+    - the operator supplied an ``expected_image_digest`` cross-check;
+    - both conditions hold.
+
+    The strongest position is "image-by-digest **and** an explicit pin"
+    because the latter survives even if a future version of the Docker
+    backend silently re-resolves a tag.
+    """
+    report = AuditReport()
+    image = getattr(opts, "image", "") or ""
+    expected = getattr(opts, "expected_image_digest", None)
+    has_inline_digest = "@sha256:" in image
+
+    if has_inline_digest and expected:
+        report.add(AuditFinding(
+            check_id="docker.image.digest_pinned_strict",
+            severity="ok",
+            title="Docker image is digest-pinned with an explicit cross-check",
+            detail=f"image={image!r} expected={expected!r}",
+        ))
+    elif has_inline_digest:
+        report.add(AuditFinding(
+            check_id="docker.image.digest_pinned_inline",
+            severity="ok",
+            title="Docker image is digest-pinned via @sha256",
+            detail=f"image={image!r}",
+        ))
+    elif expected:
+        report.add(AuditFinding(
+            check_id="docker.image.digest_pinned_explicit",
+            severity="ok",
+            title="Docker image has an explicit expected_image_digest",
+            detail=(
+                "The backend will resolve the image at runtime and "
+                "refuse on mismatch. Consider also rewriting "
+                f"image={image!r} as 'name@sha256:...' so Docker "
+                "itself enforces the pin."
+            ),
+        ))
+    else:
+        report.add(AuditFinding(
+            check_id="docker.image.digest_unpinned",
+            severity="critical" if image and ":" in image and "latest" in image
+                     else "warn",
+            title=f"Docker image {image!r} is not digest-pinned",
+            detail=(
+                "Tag-based references (':latest', ':1', etc.) can be "
+                "force-pushed under you. Pin to a digest to ensure "
+                "the agent always launches the audited image."
+            ),
+            fix_hint=(
+                "Use 'name@sha256:<hex>' or set "
+                "DockerSandboxBackendOptions.expected_image_digest."
+            ),
+        ))
+    return report
+
+
 def _check_dir_perms(path: Path, report: AuditReport, *, role: str) -> None:
     if not path.exists():
         report.add(AuditFinding(
@@ -494,6 +618,22 @@ def audit_egress_policy(policy: EgressPolicy | None) -> AuditReport:
                        "downgrade. Restrict to https unless the "
                        "destination genuinely requires http.",
             ))
+        # Wildcard catch-all rules without a caller pin make the guard
+        # effectively allow-anything for any code path that reaches it.
+        # Flag the case so operators can either narrow the host or
+        # scope to a specific tool.
+        if rule.host_pattern == "*" and rule.caller is None:
+            report.add(AuditFinding(
+                check_id=f"egress.rule_{i}.wildcard_no_caller",
+                severity="warn",
+                title="wildcard host '*' rule has no caller pin",
+                detail=(
+                    "Any code path that reaches the guard is "
+                    "permitted. Add caller=<tool name> to scope the "
+                    "rule, or replace '*' with explicit host "
+                    "patterns."
+                ),
+            ))
 
     return report
 
@@ -579,6 +719,8 @@ def load_policy_from_json(data: dict[str, Any]) -> AgentPolicy:
         auto_approve_tools=bool(data.get("auto_approve_tools", False)),
         max_iterations=int(data.get("max_iterations", 10)),
         tool_denylist=list(data.get("tool_denylist", [])),
+        allowed_read_paths=list(data.get("allowed_read_paths", [])),
+        image_digest=data.get("image_digest"),
     )
 
 
@@ -607,6 +749,7 @@ __all__ = [
     "Severity",
     "apply_fixes",
     "audit_audit_log_path",
+    "audit_docker_options",
     "audit_egress_policy",
     "audit_gateway_options",
     "audit_policy",

@@ -417,6 +417,42 @@ await mgr.aclose()                       # destroys backend sessions + cleans wo
 
 Constructor-time `allowed_write_paths` is now a fallback only — when a `policy_store` is provided, every `create()` and `write_files()` consults the live policy so a break-glass relaxation reaches new and existing sessions without restart.
 
+#### Filesystem policy: read-only vs read-write
+
+`AgentPolicy` declares the two surfaces independently, mirroring NemoClaw's `filesystem_policy.{read_only,read_write}`:
+
+```python
+from titanx.policy.types import AgentPolicy
+
+policy = AgentPolicy(
+    allowed_write_paths=["/srv/titanx/work"],     # bind-mounted :rw
+    allowed_read_paths=["/srv/titanx/refs"],      # bind-mounted :ro
+)
+```
+
+`validate_policy` runs the same forbidden-subtree check (`/etc`, `/proc`, `/var/run/...`) against both lists — read-only mounts of host config are still leaks. If a path appears in both lists `DockerSandboxBackend._filesystem_flags` keeps the writable mount and silently drops the read-only duplicate; `audit_policy` flags the overlap so the misconfig surfaces.
+
+#### Docker image digest pin
+
+```python
+from titanx.policy.types import AgentPolicy
+from titanx.sandbox.backends.docker import (
+    DockerSandboxBackend,
+    DockerSandboxBackendOptions,
+)
+
+policy = AgentPolicy(
+    image_digest="sha256:b3d8...",     # per-call pin from the policy plane
+)
+
+backend = DockerSandboxBackend(DockerSandboxBackendOptions(
+    image="ghcr.io/yourorg/sandbox:latest",
+    expected_image_digest="sha256:b3d8...",   # deployment-level pin
+))
+```
+
+`DockerSandboxBackend` resolves the configured image (`docker inspect` or an injected resolver) before launch and refuses to start on mismatch via `ImageDigestMismatch`. The per-call `policy.image_digest` overrides the deployment default. A `repo@sha256:` reference embedded in the image string short-circuits the inspect call when no override is present (Docker enforces the match itself). Long-lived sessions verify at creation time so a session cannot survive a registry compromise.
+
 #### Retry budget
 
 ```python
@@ -462,6 +498,39 @@ await guard.enforce("https://api.github.com/repos/foo/bar", "GET")  # raises Egr
 ```
 
 Rule semantics: hostnames are case-insensitive; `*.example.com` matches subdomains but **not** the apex; path prefixes are boundary-aware (`/foo` does not match `/foobar`); default scheme is `https` only. The guard is a pure function over its policy — no transparent proxy, no CA trust manipulation — so it's the host's responsibility to install it inside whatever HTTP client the tool uses.
+
+##### Per-tool egress scoping
+
+`OutboundRule.caller` pins a rule to a specific tool / handler identity. Matching is **fail-closed**: a rule with `caller="github_tool"` does not match calls that omit the caller, so a privileged egress rule cannot be inherited by generic code paths. `EgressGuard.from_ironclaw_specs(specs, scope_to_caller=True)` pins each rule to its spec's `name`, the SDK analogue of NemoClaw's `binaries:` list.
+
+```python
+guard = EgressGuard.from_ironclaw_specs(IRONCLAW_WASM_TOOLS, scope_to_caller=True)
+await guard.enforce("https://api.github.com/repos/foo/bar", "GET", caller="github")  # ok
+await guard.enforce("https://api.github.com/repos/foo/bar", "GET", caller="slack")    # EgressDenied
+```
+
+`AgentRuntime` automatically binds the dispatched tool's name as the ambient caller around every `tools.execute(...)` call via `caller_scope` (a `contextvars`-backed scope in `titanx.safety.egress`). Tool authors can therefore omit `caller=` entirely:
+
+```python
+async def my_handler(name, params):
+    # No caller= needed — the runtime already bound it for us.
+    await guard.enforce("https://api.github.com/repos/foo/bar", "GET")
+```
+
+Explicit `caller=` always wins over the ambient binding. The contextvar propagates into asyncio child tasks (`asyncio.gather`, `run_in_executor`) but not into raw `threading.Thread` workers — those must propagate explicitly with `contextvars.copy_context()`.
+
+##### Bundled presets
+
+`titanx.safety.presets` ships default-deny preset policies for `slack`, `github`, `discord`, `google` (Gmail / Calendar / Drive / Docs / Sheets / Slides + OAuth token), `huggingface`, `pypi`, `npm_registry`, `brave_search`, `composio`, and `telegram`. Each rule carries the canonical caller pin so onboarding a new integration is `compose([...])` instead of hand-rolling allowlists.
+
+```python
+from titanx.safety import presets, EgressGuard
+
+guard = EgressGuard(presets.compose(["github", "slack"]))
+await guard.enforce("https://slack.com/api/chat.postMessage", "POST", caller="slack")
+```
+
+`presets.available()` lists every registered preset; downstream packages can register their own via `presets.register(name, builder)`.
 
 #### Security posture audit (CLI)
 

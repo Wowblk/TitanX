@@ -8,6 +8,15 @@ allowed full container escape via ``["/"]``,
 breakout cheat in one shot. This module is the **single source of truth**
 for what counts as a valid policy.
 
+The ``allowed_read_paths`` field uses the *same* forbidden list as
+``allowed_write_paths``: even read-only bind-mounts of host ``/etc`` or
+``/proc`` leak host configuration into the container, which is exactly
+the leak the policy is supposed to prevent. NemoClaw's filesystem_policy
+splits ``read_only`` from ``read_write`` because the *container's* /etc
+must remain readable for resolv.conf etc.; in TitanX the policy speaks
+of *host* paths the user is exposing, and host-side privileged paths
+must not cross the boundary in either direction.
+
 Invariants enforced here are the *kernel-impactful* ones; semantic checks
 that depend on runtime state (e.g. "denied tool actually exists in the
 registry") deliberately live elsewhere. The principle: validation here
@@ -184,6 +193,38 @@ def _validate_max_iterations(value: object) -> None:
         )
 
 
+# OCI digest format: ``algo:hex``. Only sha256 is in widespread use today
+# (sha512 is allowed by the OCI spec but virtually nobody publishes it);
+# we accept anything that looks like the canonical form so future-proofing
+# doesn't require a code change. Length check rejects truncated digests
+# that some operators copy-paste accidentally.
+import re
+
+_IMAGE_DIGEST_RE = re.compile(r"^[a-z0-9]+(?:[+._-][a-z0-9]+)*:[a-fA-F0-9]{32,}$")
+
+
+def _validate_image_digest(value: object) -> None:
+    """Validate an optional OCI image digest pin.
+
+    ``None`` is allowed (no pin, audit warns separately). A non-None
+    value must look like ``algo:hex`` with at least 128 bits of digest
+    entropy. We reject obvious typos (no colon, short digest) at
+    install time so a runtime ``docker inspect`` mismatch later is
+    always a *real* mismatch and not just a malformed pin.
+    """
+    if value is None:
+        return
+    if not isinstance(value, str):
+        raise PolicyValidationError(
+            f"image_digest must be str or None, got {type(value).__name__}: {value!r}"
+        )
+    if not _IMAGE_DIGEST_RE.match(value):
+        raise PolicyValidationError(
+            f"image_digest must look like 'sha256:<hex>' with >=32 hex "
+            f"chars: {value!r}"
+        )
+
+
 def validate_policy(policy: object) -> None:
     """Raise ``PolicyValidationError`` if ``policy`` is unsafe to install.
 
@@ -204,6 +245,19 @@ def validate_policy(policy: object) -> None:
         )
     for entry in policy.allowed_write_paths:
         _validate_write_path(entry)
+
+    # ``allowed_read_paths`` is validated with the same per-entry rules
+    # as write paths: privileged host subtrees must not cross the
+    # sandbox boundary regardless of mount mode.
+    if not isinstance(getattr(policy, "allowed_read_paths", []), list):
+        raise PolicyValidationError(
+            f"allowed_read_paths must be a list, got "
+            f"{type(policy.allowed_read_paths).__name__}"
+        )
+    for entry in getattr(policy, "allowed_read_paths", []):
+        _validate_write_path(entry)
+
+    _validate_image_digest(getattr(policy, "image_digest", None))
 
     _validate_tool_denylist(policy.tool_denylist)
 

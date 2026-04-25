@@ -4,6 +4,7 @@ import asyncio
 import inspect
 from datetime import datetime, timezone
 
+from .safety.egress import caller_scope
 from .state import append_message, create_config, create_initial_state, set_pending_approval
 from .types import (
     AgentConfig,
@@ -503,8 +504,20 @@ class AgentRuntime:
             # mark the loop interrupted, and re-raise. The next
             # ``resume()`` sees a consistent message stream; the host
             # can also choose to drop the runtime entirely.
+            #
+            # ``caller_scope`` binds the dispatched tool's name as the
+            # ambient caller for any ``EgressGuard`` check inside the
+            # handler (or anything the handler awaits transitively).
+            # Tool authors no longer need to thread ``caller=`` through
+            # to ``guard.enforce(...)``: forgetting it used to silently
+            # collapse the call into "no caller", which a preset pinned
+            # to that same tool name would correctly reject. The
+            # contextvar is unwound in ``finally`` so a raise (including
+            # ``CancelledError``) cannot leak the binding into sibling
+            # tool calls.
             try:
-                result = await self._tools.execute(tool_call.name, tool_call.args)
+                with caller_scope(tool_call.name):
+                    result = await self._tools.execute(tool_call.name, tool_call.args)
             except asyncio.CancelledError:
                 append_message(
                     self.state,

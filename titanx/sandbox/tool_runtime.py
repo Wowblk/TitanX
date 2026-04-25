@@ -43,9 +43,12 @@ class SandboxedToolRuntime(ToolRuntime):
 
         req = handler.request(params)
 
+        live_policy = (
+            self._policy_store.get_policy() if self._policy_store else None
+        )
         effective_paths = (
-            self._policy_store.get_policy().allowed_write_paths
-            if self._policy_store
+            live_policy.allowed_write_paths
+            if live_policy is not None
             else self._allowed_write_paths
         )
         if effective_paths:
@@ -60,6 +63,16 @@ class SandboxedToolRuntime(ToolRuntime):
         # what actually guarantees write isolation in production.
         if effective_paths and req.allowed_write_paths is None:
             req.allowed_write_paths = list(effective_paths)
+
+        # Propagate read-only mount targets and the image digest pin from
+        # the live policy. We only set these when the handler hasn't
+        # already populated them, so a tool that wants tighter isolation
+        # than the policy can still narrow the request itself.
+        if live_policy is not None:
+            if req.allowed_read_paths is None and live_policy.allowed_read_paths:
+                req.allowed_read_paths = list(live_policy.allowed_read_paths)
+            if req.image_digest is None and live_policy.image_digest:
+                req.image_digest = live_policy.image_digest
 
         router_input = self._policy_to_router_input(handler.policy)
         selection = await self._router.select(router_input)

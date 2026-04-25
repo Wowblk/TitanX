@@ -106,11 +106,21 @@ class SandboxSessionManager:
             selection = await self._router.select(inp or SandboxRouterInput())
             now = _now()
             effective_paths = self._effective_write_paths()
+            effective_read_paths = self._effective_read_paths()
+            effective_image_digest = self._effective_image_digest()
             if hasattr(selection.backend, "create_session"):
-                base = await selection.backend.create_session(
-                    metadata,
-                    allowed_write_paths=effective_paths,
-                )
+                # The new ``allowed_read_paths`` / ``image_digest`` kwargs
+                # were added in 0.3.x. Backends written against the
+                # 0.2.x base class signature won't accept them; only
+                # forward when the operator actually populated the
+                # corresponding policy fields so legacy backends keep
+                # working as long as nobody opts in.
+                kwargs: dict = {"allowed_write_paths": effective_paths}
+                if effective_read_paths:
+                    kwargs["allowed_read_paths"] = effective_read_paths
+                if effective_image_digest:
+                    kwargs["image_digest"] = effective_image_digest
+                base = await selection.backend.create_session(metadata, **kwargs)
             else:
                 base = SandboxSession(
                     id=f"{selection.backend.kind}-{uuid4()}",
@@ -140,15 +150,22 @@ class SandboxSessionManager:
 
     async def execute(self, session_id: str, request: SandboxExecutionRequest) -> SandboxExecutionResult:
         backend, session = self._require_session(session_id)
-        # Late-bind the live policy's allowed_write_paths if the caller
-        # didn't already populate the request. The Docker backend uses
-        # this for kernel-level mount enforcement (Q5/Q11). Without
-        # this propagation, dynamic policy edits never reach a
-        # long-lived session's per-call requests.
+        # Late-bind the live policy's allowed_write_paths / read_paths /
+        # image_digest if the caller didn't already populate them. The
+        # Docker backend uses these for kernel-level mount enforcement
+        # (Q5/Q11) and for digest verification. Without this
+        # propagation, dynamic policy edits never reach a long-lived
+        # session's per-call requests.
         if request.allowed_write_paths is None:
             effective = self._effective_write_paths()
             if effective:
                 request.allowed_write_paths = list(effective)
+        if request.allowed_read_paths is None:
+            effective_read = self._effective_read_paths()
+            if effective_read:
+                request.allowed_read_paths = list(effective_read)
+        if request.image_digest is None:
+            request.image_digest = self._effective_image_digest()
         result = await backend.execute(request, session)
         self._touch(session_id)
         return result
@@ -230,6 +247,23 @@ class SandboxSessionManager:
             if paths:
                 return list(paths)
         return self._allowed_write_paths
+
+    def _effective_read_paths(self) -> list[str] | None:
+        if self._policy_store is None:
+            return None
+        try:
+            paths = self._policy_store.get_policy().allowed_read_paths
+        except Exception:
+            return None
+        return list(paths) if paths else None
+
+    def _effective_image_digest(self) -> str | None:
+        if self._policy_store is None:
+            return None
+        try:
+            return self._policy_store.get_policy().image_digest
+        except Exception:
+            return None
 
     async def _destroy_locked(self, session_id: str) -> None:
         session = self._sessions.get(session_id)

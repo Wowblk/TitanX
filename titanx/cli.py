@@ -75,6 +75,26 @@ def _build_parser() -> argparse.ArgumentParser:
              "catalog and audit it.",
     )
     audit.add_argument(
+        "--preset",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help="Compose one or more bundled egress presets and audit the "
+             "resulting EgressPolicy. May be repeated. Run with "
+             "--preset=help to list the available presets.",
+    )
+    audit.add_argument(
+        "--docker-image",
+        type=str,
+        help="Docker image string to audit for digest pinning.",
+    )
+    audit.add_argument(
+        "--docker-image-digest",
+        type=str,
+        help="Optional expected digest (sha256:...) the Docker image "
+             "must resolve to.",
+    )
+    audit.add_argument(
         "--json",
         action="store_true",
         help="Emit JSON instead of a human-readable table.",
@@ -122,6 +142,7 @@ def _load_egress_policy(path: str):
             methods=tuple(entry.get("methods", ())),
             allowed_schemes=tuple(entry.get("allowed_schemes", ("https",))),
             allowed_ports=tuple(entry.get("allowed_ports", ())),
+            caller=entry.get("caller"),
         ))
     return EgressPolicy(
         rules=rules,
@@ -166,8 +187,21 @@ def _run_audit(args: argparse.Namespace) -> int:
         gateway = _audit.load_gateway_options_from_json(_load_json_file(args.gateway))
 
     egress = None
+    preset_names = args.preset or []
+    if "help" in preset_names:
+        from .safety import presets as _presets
+        print("Available egress presets:")
+        for name in _presets.available():
+            print(f"  - {name}")
+        return 0
     if args.egress:
         egress = _load_egress_policy(args.egress)
+    elif preset_names:
+        from .safety import presets as _presets
+        try:
+            egress = _presets.compose(preset_names)
+        except KeyError as exc:
+            raise SystemExit(f"titanx audit: {exc}")
     elif args.ironclaw:
         from .tools import IRONCLAW_WASM_TOOLS
         from .safety.egress import EgressGuard
@@ -179,6 +213,15 @@ def _run_audit(args: argparse.Namespace) -> int:
         audit_log_path=args.audit_log,
         egress=egress,
     )
+
+    if args.docker_image:
+        # Construct a duck-typed options object so we don't have to
+        # import the Docker backend (and its asyncio plumbing) at audit
+        # time.
+        class _DockerOpts:
+            image = args.docker_image
+            expected_image_digest = args.docker_image_digest
+        report.merge(_audit.audit_docker_options(_DockerOpts()))
 
     if args.fix:
         actions = _audit.apply_fixes(report, dry_run=args.dry_run)

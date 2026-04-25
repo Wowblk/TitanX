@@ -104,13 +104,17 @@ class E2BSandboxBackend(SandboxBackend):
         metadata: dict[str, str] | None = None,
         *,
         allowed_write_paths: list[str] | None = None,
+        allowed_read_paths: list[str] | None = None,
+        image_digest: str | None = None,
     ) -> SandboxSession:
-        # ``allowed_write_paths`` is accepted for interface parity. E2B
-        # already isolates sandboxes per-tenant; mapping host paths into a
-        # remote sandbox is not meaningful, so we simply ignore it here. If
-        # a deployment requires per-tool path scoping inside E2B, configure
-        # it via the E2B template rather than relying on host paths.
-        del allowed_write_paths
+        # ``allowed_write_paths`` / ``allowed_read_paths`` / ``image_digest``
+        # are accepted for interface parity with DockerSandboxBackend. E2B
+        # already isolates sandboxes per-tenant and templates pin their
+        # own image content; mapping host paths or repository digests
+        # into a remote sandbox is not meaningful, so we simply ignore
+        # them here. If a deployment requires per-tool path scoping or
+        # image pinning inside E2B, configure it via the E2B template.
+        del allowed_write_paths, allowed_read_paths, image_digest
         from e2b import Sandbox
         kwargs: dict[str, Any] = {}
         if self._opts.api_key:
