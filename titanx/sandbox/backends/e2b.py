@@ -99,7 +99,18 @@ class E2BSandboxBackend(SandboxBackend):
                 duration_ms=(time.perf_counter() - start) * 1000,
             )
 
-    async def create_session(self, metadata: dict[str, str] | None = None) -> SandboxSession:
+    async def create_session(
+        self,
+        metadata: dict[str, str] | None = None,
+        *,
+        allowed_write_paths: list[str] | None = None,
+    ) -> SandboxSession:
+        # ``allowed_write_paths`` is accepted for interface parity. E2B
+        # already isolates sandboxes per-tenant; mapping host paths into a
+        # remote sandbox is not meaningful, so we simply ignore it here. If
+        # a deployment requires per-tool path scoping inside E2B, configure
+        # it via the E2B template rather than relying on host paths.
+        del allowed_write_paths
         from e2b import Sandbox
         kwargs: dict[str, Any] = {}
         if self._opts.api_key:

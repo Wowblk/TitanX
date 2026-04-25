@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .normalization import canonicalise_for_scan
 from .patterns import DEFAULT_INJECTION_PATTERNS, InjectionPattern
 from ..types import ValidatorLike, ValidationIssue, ValidationResult
 
@@ -25,8 +26,12 @@ class InputValidator(ValidatorLike):
         if len(content) > MAX_INPUT_LENGTH:
             errors.append(ValidationIssue(field=field, message="Input exceeds maximum length", code="input_too_long", severity="error"))
 
+        # Match against the canonicalised view so zero-width / BiDi /
+        # NFKC-decomposable bypasses share the same defence as
+        # ``SafetyLayer.check_input``.
+        canonical = canonicalise_for_scan(content)
         for pattern in self._patterns:
-            if pattern.regex.search(content):
+            if pattern.regex.search(canonical):
                 issue = ValidationIssue(
                     field=field,
                     message=f"Potential prompt injection detected: {pattern.name}",

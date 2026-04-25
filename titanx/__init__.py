@@ -6,7 +6,15 @@ from .types import (
 from .state import create_config, create_initial_state
 from .runtime import AgentRuntime
 from .factory import CreateSandboxedRuntimeOptions, create_sandboxed_runtime
-from .safety import SafetyLayer
+from .safety import (
+    EgressDecision,
+    EgressDenied,
+    EgressGuard,
+    EgressPolicy,
+    OutboundRule,
+    SafetyLayer,
+    audit_log_egress_hook,
+)
 from .policy import AgentPolicy, AuditLog, BreakGlassController, PolicyStore
 from .context import CompactionOptions, CompactionStrategy
 from .resilience import CircuitBreaker, ResilientOptions, ResilientSandboxBackend
@@ -30,6 +38,8 @@ __all__ = [
     "AgentRuntime",
     "CreateSandboxedRuntimeOptions", "create_sandboxed_runtime",
     "SafetyLayer",
+    "EgressDecision", "EgressDenied", "EgressGuard", "EgressPolicy",
+    "OutboundRule", "audit_log_egress_hook",
     "AgentPolicy", "AuditLog", "BreakGlassController", "PolicyStore",
     "CompactionOptions", "CompactionStrategy",
     "CircuitBreaker", "ResilientOptions", "ResilientSandboxBackend",

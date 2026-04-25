@@ -15,6 +15,12 @@ class SandboxExecutionRequest:
     env: dict[str, str] = field(default_factory=dict)
     timeout_ms: int | None = None
     input: str | None = None
+    # Absolute host paths the workload is permitted to write to. Backends are
+    # expected to enforce this list at the kernel/sandbox level (e.g. read-only
+    # root filesystem + bind-mounted writable paths for Docker, equivalent
+    # mount overlays for E2B). The host-side PathGuard is defence-in-depth
+    # only — this field is the authoritative boundary.
+    allowed_write_paths: list[str] | None = None
 
 
 @dataclass
@@ -84,6 +90,14 @@ class SandboxRouterInput:
     needs_network: bool = False
     needs_browser: bool = False
     needs_package_install: bool = False
+    # Hard floor on sandbox isolation. ``"docker"`` rejects ``"wasm"``
+    # silently-fallback selections; ``"e2b"`` rejects everything except
+    # remote isolation. The router refuses to satisfy the request
+    # below this floor — failing closed beats leaking a high-risk
+    # workload onto a low-isolation backend during a partial outage.
+    # ``None`` (default) preserves legacy "best effort" behaviour:
+    # the router will pick the highest-isolation backend it can find.
+    min_isolation: SandboxKind | None = None
 
 
 @dataclass
@@ -115,7 +129,12 @@ class SandboxBackend:
     ) -> SandboxExecutionResult:
         raise NotImplementedError
 
-    async def create_session(self, metadata: dict[str, str] | None = None) -> SandboxSession:
+    async def create_session(
+        self,
+        metadata: dict[str, str] | None = None,
+        *,
+        allowed_write_paths: list[str] | None = None,
+    ) -> SandboxSession:
         raise NotImplementedError
 
     async def destroy_session(self, session_id: str) -> None:

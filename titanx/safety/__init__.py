@@ -2,6 +2,16 @@ from .patterns import DEFAULT_INJECTION_PATTERNS, DEFAULT_PII_PATTERNS, Injectio
 from .redactor import PiiRedactor, RedactionResult
 from .validator import InputValidator
 from .safety_layer import SafetyLayer
+from .egress import (
+    EgressAction,
+    EgressAuditHook,
+    EgressDecision,
+    EgressDenied,
+    EgressGuard,
+    EgressPolicy,
+    OutboundRule,
+    audit_log_egress_hook,
+)
 
 __all__ = [
     "DEFAULT_INJECTION_PATTERNS",
@@ -12,4 +22,12 @@ __all__ = [
     "RedactionResult",
     "InputValidator",
     "SafetyLayer",
+    "EgressAction",
+    "EgressAuditHook",
+    "EgressDecision",
+    "EgressDenied",
+    "EgressGuard",
+    "EgressPolicy",
+    "OutboundRule",
+    "audit_log_egress_hook",
 ]

@@ -37,6 +37,9 @@ The gateway starts on `http://localhost:3000`.
 | `titanx/retrieval/` | Hybrid retrieval and MMR ranking |
 | `titanx/tools/` | Optional tool catalogs, including IronClaw-inspired WASM tools |
 | `titanx/gateway/` | FastAPI gateway and UI serving |
+| `titanx/audit.py` | Programmatic security posture audit (CLI: `titanx audit`) |
+| `titanx/cli.py` | Command-line entry point for operator preflight |
+| [`SECURITY.md`](./SECURITY.md) | Trust model, in-scope defenses, out-of-scope assumptions |
 
 ## Architecture
 
@@ -107,9 +110,12 @@ The gateway starts on `http://localhost:3000`.
 ║                     SANDBOX LAYER  (titanx/sandbox/)                          ║
 ║                                                                               ║
 ║   SandboxedToolRuntime (tool_runtime.py)                                      ║
-║     ├─ PathGuard          write-path allow-list + shell redirect scan         ║
+║     ├─ PathGuard          fail-closed shlex scan; defence-in-depth only       ║
 ║     ├─ SessionManager     per-session lifecycle                               ║
 ║     └─ SandboxRouter  ──► selects backend by risk_level                       ║
+║          │                                                                    ║
+║          └─► Real boundary: Docker backend mounts / read-only +               ║
+║              bind-mounts allowed_write_paths writable (kernel-enforced)       ║
 ║                                                                               ║
 ║              ┌──────────────────────┴──────────────────────┐                  ║
 ║              ▼                                             ▼                  ║
@@ -299,12 +305,181 @@ classDiagram
    1. User → Host:   SafetyLayer validates/redacts (injection, PII, paths)    │
    2. LLM → Host:    LLM output treated as untrusted; re-checked by Safety    │
                      + PolicyStore gates tool calls (approval / break-glass)  │
-   3. Host → Sandbox: PathGuard vets write paths; SandboxRouter picks         │
-                     isolation tier by risk_level; ResilientBackend wraps     │
-                     calls with retry + circuit breaker                       │
+   3. Host → Sandbox: PathGuard does a fail-closed shlex scan as an early    │
+                     filter (NOT a security boundary); SandboxRouter picks    │
+                     isolation tier by risk_level; the *authoritative*        │
+                     write boundary is the Docker backend mounting / RO +     │
+                     bind-mounting allowed_write_paths RW so the kernel       │
+                     rejects any write outside the whitelist (EROFS).         │
+                     ResilientBackend wraps calls with retry + breaker.       │
 ```
 
 Trust escalates left-to-right; every boundary crossing is mediated by a guard component. Audit events are appended to JSONL at every policy decision and every tool invocation.
+
+### 5. Production Hardening Hooks
+
+These are the knobs you need to tune the runtime, gateway, and sandbox layers for real deployments. Defaults are tuned for development convenience and are deliberately loud about it (e.g. CORS `*` or missing `api_key` log a startup warning to stderr).
+
+> See [CHANGELOG.md](./CHANGELOG.md) for the version-by-version migration notes.
+
+#### Gateway
+
+```python
+from titanx.gateway import GatewayOptions, create_gateway
+
+app = create_gateway(GatewayOptions(
+    api_key="...",                       # hmac.compare_digest comparison; required in prod
+    allowed_origins=["https://app.example"],   # CORS — never leave as ["*"] in prod
+    allowed_methods=["GET", "POST"],
+    allowed_headers=["x-api-key", "content-type"],
+    max_sessions=1000,                   # bounded LRU; keys past the cap are evicted
+    session_idle_ttl_seconds=3600.0,     # idle sessions are reaped on next access
+    create_runtime=...,
+))
+```
+
+The HTTP middleware authenticates every `/api/*` request; the WebSocket handler performs the same `hmac.compare_digest` check inline before `accept()` because Starlette HTTP middleware does not run on WS handshakes. Concurrent `run_prompt` calls against the same `session_id` are serialised by `SessionEntry.lock`, so two parallel POSTs cannot interleave their `state.messages` mutations and break the OpenAI/Anthropic tool-call protocol.
+
+#### Cancellation protocol
+
+When the host (typically the gateway after a client disconnect) cancels the task running `AgentRuntime.run_prompt`, the runtime:
+
+1. Closes the in-flight tool call by appending a synthesised `ToolMessage` carrying `"Tool execution was cancelled before completion."`. Every assistant `tool_call.id` therefore has a matching `ToolMessage`, so the next LLM call (after `resume()`) is still protocol-valid.
+2. Sets `state.signal = "interrupt"` and emits `LoopEndEvent(reason="cancelled")` so observers can react symmetrically with the other terminal reasons.
+3. Re-raises `asyncio.CancelledError`. Hosts that swallow it leak the cancellation contract — don't.
+
+Calling `runtime.resume()` on an interrupted state continues from the next pending tool. Callers that want a hard reset should drop the runtime instead.
+
+#### Break-glass lifecycle
+
+```python
+from titanx.policy import BreakGlassController
+
+bg = BreakGlassController(policy_store)
+session = await bg.activate("incident-7421", ttl_ms=10 * 60_000, relaxed_policy=relaxed)
+
+# When the operator is done — restores the original policy AND cancels the timer:
+await bg.revoke("operator complete")
+
+# On gateway shutdown, regardless of state:
+await bg.aclose()
+```
+
+`dispose()` is retained for source-compat but **does not roll back the relaxed policy**; new code must use `revoke()` / `aclose()`. `ttl_ms <= 0` and non-int values raise immediately. Manual revoke and TTL expiry are mutually exclusive (one lock); they cannot double-rollback or double-audit.
+
+#### Audit fan-out
+
+`AuditLog` is the canonical audit pipeline. To mirror entries into a relational store, plug a secondary sink in instead of writing directly to `StorageBackend.save_log` (which would create a second, unreconciled audit stream):
+
+```python
+from titanx.policy import AuditLog, storage_secondary_sink
+
+audit = AuditLog(
+    "/var/log/titanx/audit.jsonl",
+    fsync_policy="interval",
+    secondary_sink=storage_secondary_sink(my_storage, session_id=session_id),
+)
+```
+
+The sink runs serially with `append()`. If it raises once, it is permanently disabled with a stderr warning; the JSONL file remains the durable record either way.
+
+#### Sandbox isolation floor
+
+Tools that must not silently downgrade to a weaker backend during a partial outage should set a hard floor:
+
+```python
+from titanx.sandbox import SandboxRouterInput
+
+selection = await router.select(SandboxRouterInput(
+    risk_level="high",
+    needs_browser=True,
+    min_isolation="docker",        # refuses if only WASI is reachable
+))
+```
+
+If no candidate backend clears the floor, `select()` raises `RuntimeError` with a per-backend rejection trail. An optional `on_selection` callback fires for every successful selection so you can log which backend a tool actually ran on.
+
+#### Sandbox session lifecycle
+
+```python
+from titanx.sandbox import SandboxSessionManager
+
+mgr = SandboxSessionManager(
+    router,
+    workspace_dir="/var/lib/titanx/work",
+    policy_store=policy_store,           # live policy lookup; break-glass takes effect
+    max_sessions=256,
+    idle_ttl_seconds=1800.0,
+)
+# ...
+await mgr.aclose()                       # destroys backend sessions + cleans workspace dirs
+```
+
+Constructor-time `allowed_write_paths` is now a fallback only — when a `policy_store` is provided, every `create()` and `write_files()` consults the live policy so a break-glass relaxation reaches new and existing sessions without restart.
+
+#### Retry budget
+
+```python
+from titanx.resilience import RetryOptions, with_retry
+
+await with_retry(
+    operation,
+    RetryOptions(
+        max_attempts=5,
+        base_delay_ms=200,
+        max_delay_ms=5_000,
+        jitter=True,
+        max_total_time_ms=10_000,        # whole-budget deadline across attempts + sleeps
+    ),
+)
+```
+
+`asyncio.CancelledError` and `KeyboardInterrupt` are never retried — cooperative cancellation must propagate immediately.
+
+#### Per-prompt invariants
+
+`run_prompt` enforces three invariants at the trust boundary itself, regardless of which `SafetyLayerLike` is plugged in:
+
+- Empty input is rejected (`ValueError`).
+- Inputs longer than `_MAX_PROMPT_LENGTH = 100_000` are rejected.
+- `state.iteration` resets to `0` every call. `max_iterations` therefore caps the work per user turn, not per session.
+
+#### Outbound HTTP allowlist (egress guard)
+
+`IronClawWasmToolSpec.http_allowlist` is no longer declarative-only. `titanx.safety.egress.EgressGuard` is a default-deny allowlist enforcer that hosts call from inside their HTTP-capable tools. Build one straight from the bundled catalog:
+
+```python
+from titanx import IRONCLAW_WASM_TOOLS, EgressDenied
+from titanx.safety.egress import EgressGuard, audit_log_egress_hook
+
+guard = EgressGuard.from_ironclaw_specs(
+    IRONCLAW_WASM_TOOLS,
+    audit_hook=audit_log_egress_hook(audit_log),  # one AuditEntry per decision
+)
+
+# Inside a tool handler that issues HTTP itself:
+await guard.enforce("https://api.github.com/repos/foo/bar", "GET")  # raises EgressDenied on miss
+```
+
+Rule semantics: hostnames are case-insensitive; `*.example.com` matches subdomains but **not** the apex; path prefixes are boundary-aware (`/foo` does not match `/foobar`); default scheme is `https` only. The guard is a pure function over its policy — no transparent proxy, no CA trust manipulation — so it's the host's responsibility to install it inside whatever HTTP client the tool uses.
+
+#### Security posture audit (CLI)
+
+The `titanx audit` console script (and `python -m titanx.cli audit`) runs a static posture check against your configuration. It is the preflight that `SECURITY.md` requires before opening a vulnerability report.
+
+```bash
+titanx audit \
+  --policy /etc/titanx/policy.json \
+  --gateway /etc/titanx/gateway.json \
+  --audit-log /var/log/titanx/audit.jsonl \
+  --ironclaw                                # audit the bundled WASM-tool egress policy
+```
+
+Severities map to exit codes: `--fail-on=critical` (default) exits `2` if any critical finding is present; `--fail-on=warn` promotes warnings too. `--fix` applies the auto-fixable findings (currently file/dir permissions only); pair with `--dry-run` to preview. `--json` emits a machine-parseable report.
+
+Programmatic equivalents (`titanx.audit.audit_policy`, `audit_gateway_options`, `audit_audit_log_path`, `audit_egress_policy`, `audit_runtime`) return `AuditReport` objects so you can wire the same checks into your CI gate.
+
+> See [SECURITY.md](./SECURITY.md) for the trust model, in-scope defenses, and the out-of-scope assumptions that govern what we treat as a vulnerability.
 
 ## IronClaw WASM Tool Catalog
 

@@ -25,6 +25,15 @@ class DockerSandboxBackendOptions:
     docker_bin: str = "docker"
     image: str = "alpine:latest"
     network: str = "none"
+    # Kernel-enforced filesystem hardening. When ``read_only_root`` is on,
+    # the container's root filesystem is mounted read-only and only the paths
+    # listed in ``SandboxExecutionRequest.allowed_write_paths`` are
+    # bind-mounted writable. ``tmpfs_paths`` are always mounted as tmpfs so
+    # programs that legitimately need scratch space (compiler temp dirs,
+    # /var/tmp, etc.) don't break. This is the *real* write-path boundary —
+    # the host-side ``path_guard`` is only an early-fail filter.
+    read_only_root: bool = True
+    tmpfs_paths: tuple[str, ...] = ("/tmp",)
     executor: Callable | None = None
     file_writer: Callable | None = None
     file_reader: Callable | None = None
@@ -55,6 +64,46 @@ def _build_shell_command(request: SandboxExecutionRequest) -> str:
     argv = " ".join(_quote(a) for a in [request.command, *request.args])
     parts.append(argv)
     return " && ".join(parts)
+
+
+def _filesystem_flags(
+    *,
+    read_only_root: bool,
+    tmpfs_paths: tuple[str, ...],
+    allowed_write_paths: list[str] | None,
+) -> list[str]:
+    """Build the docker flags that enforce the write-path boundary.
+
+    When ``read_only_root`` is enabled, the root filesystem is mounted RO
+    (kernel-enforced). ``tmpfs_paths`` are mounted as ephemeral tmpfs so
+    writes to /tmp etc. still work without leaking out of the container.
+    Each entry in ``allowed_write_paths`` is bind-mounted RW under the
+    same path inside the container, so writes outside this set fail with
+    EROFS no matter what shell trick the workload uses.
+
+    Defense in depth: ``validate_write_path`` is re-run on every entry
+    here, even though ``PolicyStore.set`` already validates. The
+    ``SandboxExecutionRequest`` is mutable and could be constructed
+    directly by a future backend, a test harness, or a rogue caller that
+    skips the policy plane entirely. The kernel boundary deserves its
+    own gate. ``PolicyValidationError`` propagates up so the caller sees
+    *why* the request was rejected; the resilient backend wrapper then
+    reports the failure as a non-retryable error.
+    """
+    from ...policy.validation import validate_write_path
+
+    flags: list[str] = []
+    if not read_only_root:
+        # Caller explicitly opted out — skip all hardening.
+        return flags
+
+    flags.append("--read-only")
+    for tmp in tmpfs_paths:
+        flags.extend(["--tmpfs", tmp])
+    for host_path in allowed_write_paths or []:
+        validate_write_path(host_path)
+        flags.extend(["-v", f"{host_path}:{host_path}:rw"])
+    return flags
 
 
 class DockerSandboxBackend(SandboxBackend):
@@ -108,6 +157,9 @@ class DockerSandboxBackend(SandboxBackend):
             timeout_s = (request.timeout_ms / 1000) if request.timeout_ms else None
 
             if session:
+                # Sessions inherit the mount layout fixed at create_session
+                # time; per-call write-path changes don't re-mount. Document
+                # this caveat for callers that mutate AgentPolicy mid-session.
                 cmd = [
                     self._opts.docker_bin, "exec",
                     *env_flags,
@@ -115,9 +167,15 @@ class DockerSandboxBackend(SandboxBackend):
                     "sh", "-c", shell_cmd,
                 ]
             else:
+                fs_flags = _filesystem_flags(
+                    read_only_root=self._opts.read_only_root,
+                    tmpfs_paths=self._opts.tmpfs_paths,
+                    allowed_write_paths=request.allowed_write_paths,
+                )
                 cmd = [
                     self._opts.docker_bin, "run", "--rm",
                     f"--network={self._opts.network}",
+                    *fs_flags,
                     *env_flags,
                     self._opts.image,
                     "sh", "-c", shell_cmd,
@@ -148,11 +206,26 @@ class DockerSandboxBackend(SandboxBackend):
                 duration_ms=(time.perf_counter() - start) * 1000,
             )
 
-    async def create_session(self, metadata: dict[str, str] | None = None) -> SandboxSession:
+    async def create_session(
+        self,
+        metadata: dict[str, str] | None = None,
+        *,
+        allowed_write_paths: list[str] | None = None,
+    ) -> SandboxSession:
         container_name = f"titanx-{uuid4().hex[:12]}"
+        # Sessions are long-lived — bake the write-path boundary into the
+        # mount layout at creation time. Mutations to AgentPolicy after the
+        # session is up will not affect this session; destroy + recreate is
+        # required to pick up new paths.
+        fs_flags = _filesystem_flags(
+            read_only_root=self._opts.read_only_root,
+            tmpfs_paths=self._opts.tmpfs_paths,
+            allowed_write_paths=allowed_write_paths,
+        )
         cmd = [
             self._opts.docker_bin, "run", "-d", "--name", container_name,
             f"--network={self._opts.network}",
+            *fs_flags,
             self._opts.image,
             "sh", "-c", "tail -f /dev/null",
         ]

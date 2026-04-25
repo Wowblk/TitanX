@@ -3,7 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .circuit_breaker import CircuitBreaker, CircuitBreakerOptions, CircuitOpenError
+from .circuit_breaker import (
+    CircuitBreaker,
+    CircuitBreakerOptions,
+    CircuitOpenError,
+    StateChangeCallback,
+)
 from .retry import RetryOptions, with_retry
 from ..sandbox.types import (
     SandboxBackend,
@@ -26,6 +31,12 @@ class ResilientOptions:
     base_delay_ms: int = 100
     max_delay_ms: int = 10_000
     jitter: bool = True
+    # Synchronous observer for circuit-breaker state transitions. Wire this
+    # to the audit log / metrics sink to make backend health visible
+    # outside the runtime. The callback runs while the breaker's internal
+    # lock is held — see ``StateChangeCallback`` for the no-blocking
+    # contract. ``None`` keeps the legacy silent behaviour.
+    on_state_change: StateChangeCallback | None = None
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -43,6 +54,7 @@ class ResilientSandboxBackend(SandboxBackend):
                 success_threshold=opts.success_threshold,
                 cooldown_ms=opts.cooldown_ms,
                 window_ms=opts.window_ms,
+                on_state_change=opts.on_state_change,
             ),
         )
         self._retry_opts = RetryOptions(
@@ -73,11 +85,21 @@ class ResilientSandboxBackend(SandboxBackend):
             lambda: with_retry(lambda: self._backend.execute(request, session), self._retry_opts)
         )
 
-    async def create_session(self, metadata: dict[str, str] | None = None) -> SandboxSession:
+    async def create_session(
+        self,
+        metadata: dict[str, str] | None = None,
+        *,
+        allowed_write_paths: list[str] | None = None,
+    ) -> SandboxSession:
         if not hasattr(self._backend, "create_session"):
             raise NotImplementedError(f"{self.kind} does not support sessions")
         return await self._breaker.call(
-            lambda: with_retry(lambda: self._backend.create_session(metadata), self._retry_opts)
+            lambda: with_retry(
+                lambda: self._backend.create_session(
+                    metadata, allowed_write_paths=allowed_write_paths
+                ),
+                self._retry_opts,
+            )
         )
 
     async def destroy_session(self, session_id: str) -> None:

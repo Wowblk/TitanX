@@ -11,18 +11,47 @@ from .types import JobEntry, LogEntry, MemoryEntry, ScoredMemory, StorageBackend
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity that refuses dimension mismatch.
+
+    The historical implementation did ``zip(a, b)`` which silently
+    truncates to the shorter sequence — heterogeneous embeddings (e.g.
+    a 768-dim model coexisting with a 1536-dim model in the same
+    table) would silently produce wrong scores instead of raising. We
+    raise the same ValueError ``mmr.py`` raises (Q10 parity).
+    """
+    if len(a) != len(b):
+        raise ValueError(
+            f"cosine_similarity dimension mismatch: {len(a)} != {len(b)}; "
+            "heterogeneous embedding dimensions are unsupported"
+        )
     dot = sum(x * y for x, y in zip(a, b))
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(x * x for x in b))
     return dot / (na * nb) if na * nb else 0.0
 
 
+# Hard cap on the number of rows ``search_by_vector`` will pull back
+# from the DB and rescore in Python. libsql has no native ANN index,
+# so the operation is O(N · d) by construction; this cap is the
+# difference between "slow at 10k rows" and "process killed at 10M
+# rows". Tune via ``LibSQLBackend(max_vector_scan=...)`` if you know
+# your corpus size and can afford the latency.
+DEFAULT_VECTOR_SCAN_LIMIT = 5_000
+
+
 class LibSQLBackend(StorageBackend):
-    def __init__(self, url: str, auth_token: str | None = None) -> None:
+    def __init__(
+        self,
+        url: str,
+        auth_token: str | None = None,
+        *,
+        max_vector_scan: int = DEFAULT_VECTOR_SCAN_LIMIT,
+    ) -> None:
         self._url = url
         self._auth_token = auth_token
         self._client = None
         self._has_fts = False
+        self._max_vector_scan = max(1, max_vector_scan)
 
     async def initialize(self) -> None:
         from libsql_client import create_client
@@ -77,32 +106,85 @@ class LibSQLBackend(StorageBackend):
         id_ = str(uuid4())
         now = datetime.now(timezone.utc)
         emb_str = json.dumps(embedding) if embedding else None
-        await self._client.execute(
+
+        # Atomic INSERT into ``memories`` + ``memories_fts``. Without
+        # this, a writer crashing between the two statements (or a
+        # concurrent reader observing the half-state) would see
+        # unindexed rows that ``search_by_fts`` quietly misses.
+        # libsql's ``batch`` accepts a list of statements and runs them
+        # in a single transaction; if any statement fails the whole
+        # batch rolls back. We fall back to two-step + best-effort if
+        # ``batch`` is unavailable on this client version.
+        statements: list[tuple[str, list[Any]]] = [(
             "INSERT INTO memories (id, session_id, content, role, embedding, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             [id_, session_id, content, role, emb_str, now.isoformat()],
-        )
+        )]
         if self._has_fts:
+            statements.append((
+                "INSERT INTO memories_fts(rowid, content) SELECT rowid, content FROM memories WHERE id = ?",
+                [id_],
+            ))
+
+        if hasattr(self._client, "batch") and len(statements) > 1:
             try:
-                await self._client.execute(
-                    "INSERT INTO memories_fts(rowid, content) SELECT rowid, content FROM memories WHERE id = ?",
-                    [id_],
-                )
+                await self._client.batch(statements)  # type: ignore[arg-type]
             except Exception:
-                pass
+                # Older client: fall back to non-transactional execution.
+                for sql, params in statements:
+                    await self._client.execute(sql, params)
+        else:
+            for sql, params in statements:
+                try:
+                    await self._client.execute(sql, params)
+                except Exception:
+                    # Only the FTS sync is allowed to soft-fail —
+                    # losing the primary insert means we'd return a
+                    # MemoryEntry that doesn't actually exist on disk.
+                    if "memories_fts" in sql:
+                        continue
+                    raise
+
         return MemoryEntry(id=id_, session_id=session_id, content=content, role=role,
                            created_at=now, embedding=embedding)
 
     async def search_by_vector(self, embedding: list[float], session_id: str | None = None, limit: int = 10) -> list[ScoredMemory]:
-        where = "WHERE session_id = ?" if session_id else ""
-        params = [session_id] if session_id else []
-        rs = await self._client.execute(f"SELECT * FROM memories {where}", params)
+        # libsql has no native ANN index — the work is O(N·d) per
+        # query. We bound N at ``_max_vector_scan`` and prefer the most
+        # recently created rows, which is the right heuristic for
+        # conversation memory (recent turns are the typical retrieval
+        # target). Rows older than the cap remain searchable via FTS
+        # but won't be vector-scored. For corpora past ``_max_vector_scan``
+        # use ``PgVectorBackend`` instead — it has a real ivfflat index.
+        # Skipping rows without an embedding at SQL time keeps the
+        # in-Python rescore tight.
+        where = "WHERE embedding IS NOT NULL"
+        params: list[Any] = []
+        if session_id:
+            where += " AND session_id = ?"
+            params.append(session_id)
+        params.append(self._max_vector_scan)
+        rs = await self._client.execute(
+            f"SELECT * FROM memories {where} ORDER BY created_at DESC LIMIT ?",
+            params,
+        )
         results: list[tuple[float, MemoryEntry]] = []
+        skipped_dim_mismatch = 0
         for row in rs.rows:
             emb_str = row[4]
             if not emb_str:
                 continue
-            emb = json.loads(emb_str)
-            score = _cosine(embedding, emb)
+            try:
+                emb = json.loads(emb_str)
+            except Exception:
+                continue
+            try:
+                score = _cosine(embedding, emb)
+            except ValueError:
+                # Heterogeneous-dim row in the corpus. Skip rather than
+                # crash the whole query — the alternative is a single
+                # bad row taking down every retrieval.
+                skipped_dim_mismatch += 1
+                continue
             results.append((score, self._row_to_memory(row)))
         results.sort(key=lambda x: x[0], reverse=True)
         return [ScoredMemory(**m.__dict__, score=s, source="vector") for s, m in results[:limit]]

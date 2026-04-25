@@ -4,7 +4,12 @@ from .types import (
     SandboxFileEntry, SandboxKind, SandboxRiskLevel, SandboxRouterInput,
     SandboxSelection, SandboxSession, SandboxSnapshot, SandboxToolPolicy,
 )
-from .path_guard import extract_shell_write_targets, is_path_allowed
+from .path_guard import (
+    ShellWriteScan,
+    extract_shell_write_targets,
+    is_path_allowed,
+    scan_shell_write_targets,
+)
 from .router import SandboxRouter
 from .tool_runtime import SandboxedToolHandler, SandboxedToolRuntime
 from .session_manager import SandboxSessionManager
@@ -19,7 +24,8 @@ __all__ = [
     "SandboxBackendCapabilities", "SandboxExecutionRequest", "SandboxExecutionResult",
     "SandboxFileEntry", "SandboxKind", "SandboxRiskLevel", "SandboxRouterInput",
     "SandboxSelection", "SandboxSession", "SandboxSnapshot", "SandboxToolPolicy",
-    "extract_shell_write_targets", "is_path_allowed",
+    "ShellWriteScan",
+    "extract_shell_write_targets", "is_path_allowed", "scan_shell_write_targets",
     "SandboxRouter",
     "SandboxedToolHandler", "SandboxedToolRuntime",
     "SandboxSessionManager",

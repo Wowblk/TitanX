@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..types import ToolDefinition, ToolExecutionResult, ToolRuntime
-from .path_guard import extract_shell_write_targets, is_path_allowed
+from .path_guard import is_path_allowed, scan_shell_write_targets
 from .router import SandboxRouter
 from .types import SandboxExecutionRequest, SandboxRouterInput, SandboxToolPolicy
 
@@ -52,6 +53,14 @@ class SandboxedToolRuntime(ToolRuntime):
             if denied:
                 return ToolExecutionResult(output=denied, error="path_not_allowed")
 
+        # Propagate the write-path whitelist into the request so the chosen
+        # backend can enforce it at the kernel/sandbox layer (e.g. Docker
+        # mounts ``/`` read-only and bind-mounts these paths writable). The
+        # PathGuard check above is *defence-in-depth*; this propagation is
+        # what actually guarantees write isolation in production.
+        if effective_paths and req.allowed_write_paths is None:
+            req.allowed_write_paths = list(effective_paths)
+
         router_input = self._policy_to_router_input(handler.policy)
         selection = await self._router.select(router_input)
         result = await selection.backend.execute(req)
@@ -67,9 +76,19 @@ class SandboxedToolRuntime(ToolRuntime):
         )
 
     def _check_write_paths(self, req: SandboxExecutionRequest, allowed: list[str]) -> str | None:
-        if req.cwd and not is_path_allowed(req.cwd, allowed):
-            return f"Working directory '{req.cwd}' is not permitted by the path whitelist"
-        for target in extract_shell_write_targets(req.command, req.args):
+        if req.cwd:
+            if not os.path.isabs(req.cwd):
+                return f"Working directory '{req.cwd}' must be an absolute path"
+            if not is_path_allowed(req.cwd, allowed):
+                return f"Working directory '{req.cwd}' is not permitted by the path whitelist"
+        scan = scan_shell_write_targets(req.command, req.args, cwd=req.cwd)
+        if scan.refuse_reason:
+            # Fail closed: anything we can't statically reason about is dropped
+            # at the host before it ever reaches the sandbox backend. The
+            # sandbox itself is still the authoritative boundary, but we
+            # prefer not to even hand the workload over.
+            return f"Refusing command — cannot statically verify write targets: {scan.refuse_reason}"
+        for target in scan.targets:
             if not is_path_allowed(target, allowed):
                 return f"Write to '{target}' is not permitted by the path whitelist"
         return None
