@@ -92,6 +92,31 @@ that defeats one of these without operator complicity is in scope.
    which enforces `IronClawWasmToolSpec.http_allowlist` against the
    actual destination host, port, scheme, and path. Default action is
    **deny**.
+9b. **SSRF private-destination block**
+    (`EgressPolicy.block_private_addresses`, default-on). Refuses
+    URLs whose authority is a literal RFC1918 / loopback /
+    link-local / CGNAT / multicast / reserved IP, or a known
+    cloud-metadata sentinel hostname (`metadata.google.internal`,
+    `instance-data`, `metadata.azure.com`, …). Runs **before** the
+    allowlist so an allowlisted host name that secretly resolves to
+    `169.254.169.254` is still refused. Per-rule opt-out via
+    `OutboundRule.allow_private` for legitimate internal-API access;
+    operator-extended sentinels via
+    `EgressPolicy.extra_blocked_hostnames`. Limitation: the check
+    runs on the URL host string, not on the resolved IP — a DNS
+    rebinding attack between the check and the actual `connect(2)`
+    is upstream of us (see "Out of scope" below).
+9c. **Outbound credential-shape scan**
+    (`OutboundSecretScanner`, `EgressPolicy.outbound_secret_action`).
+    `EgressGuard.enforce(url, method, *, headers=, body=)` scans
+    every outbound request for vendor-specific credential shapes
+    (GitHub PAT, AWS access/secret key, Slack/Stripe/JWT/Bearer/
+    Anthropic/OpenAI/Google/SendGrid). Default mode is `"warn"`
+    (audit-only); flip to `"block"` once an operator has verified
+    zero false positives on legitimate traffic. Matched values are
+    deliberately not stored in the decision or audit payload — only
+    the pattern names — so the audit log does not become a second
+    exfil path.
 9a. **Per-tool egress scoping** (`OutboundRule.caller`,
     `EgressGuard.from_ironclaw_specs(scope_to_caller=True)`,
     `caller_scope`).
@@ -110,6 +135,18 @@ that defeats one of these without operator complicity is in scope.
     client cannot pin memory.
 11. **Constant-time API-key comparison** in the gateway HTTP middleware
     *and* WebSocket handshake.
+12. **Process-isolated WASM tool runtime**
+    (`titanx-sidecar` + `SidecarSandboxBackend`, new in 0.3.x).
+    Optional opt-in backend that runs WASM modules in a separate
+    Rust process. The sidecar links only WASI preview1, so a module
+    that imports `wasi-sockets` or `wasi-http` fails at instantiation
+    (structural network deny). Per-call memory cap, fuel cap, and
+    wall-clock kill are enforced both Python-side and Rust-side; a
+    panic / OOM in wasmtime cannot reach the agent's heap. The
+    sidecar is built from `sidecar/`; in v0.3.x it ships as a
+    skeleton (preview1 + path-validated preopens) with the
+    capability-handle / WIT path documented in
+    `docs/sidecar-rfc.md`.
 
 ## 3. Out of scope (and why)
 

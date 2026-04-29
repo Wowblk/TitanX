@@ -10,9 +10,16 @@ from .egress import (
     EgressGuard,
     EgressPolicy,
     OutboundRule,
+    PrivateAddressDecision,
     audit_log_egress_hook,
     caller_scope,
     current_caller,
+)
+from .secret_scan import (
+    OutboundSecretScanner,
+    ScanResult,
+    SecretMatch,
+    SecretScanAction,
 )
 from . import presets
 
@@ -32,6 +39,11 @@ __all__ = [
     "EgressGuard",
     "EgressPolicy",
     "OutboundRule",
+    "OutboundSecretScanner",
+    "PrivateAddressDecision",
+    "ScanResult",
+    "SecretMatch",
+    "SecretScanAction",
     "audit_log_egress_hook",
     "caller_scope",
     "current_caller",

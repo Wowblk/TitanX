@@ -21,6 +21,9 @@ build/
 dist/
 *.egg-info/
 
+# Rust (sidecar + wasm smoke fixture crate)
+target/
+
 # Legacy local JS artifacts
 node_modules/
 

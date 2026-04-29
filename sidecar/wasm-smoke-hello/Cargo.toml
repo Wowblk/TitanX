@@ -1,0 +1,11 @@
+[package]
+name = "wasm-smoke-hello"
+version = "0.1.0"
+edition = "2021"
+description = "Tiny WASI preview1 binary for TitanX sidecar execute smoke test"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "wasm-hello"
+path = "src/main.rs"

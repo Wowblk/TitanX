@@ -600,6 +600,98 @@ def audit_egress_policy(policy: EgressPolicy | None) -> AuditReport:
                    "for tools that don't need network access.",
         ))
 
+    # SSRF private-destination block. Default-on; flag when an
+    # operator turned it off.
+    if not getattr(policy, "block_private_addresses", True):
+        report.add(AuditFinding(
+            check_id="egress.ssrf_block_disabled",
+            severity="critical",
+            title="EgressPolicy.block_private_addresses=False",
+            detail=(
+                "The pre-allowlist SSRF guard is off. A rule that "
+                "allowlists *.example.com will permit reaching "
+                "RFC1918 / link-local / cloud-metadata addresses "
+                "if any name resolves there. The default is True; "
+                "leave it on unless every destination is a literal "
+                "public IP you've audited."
+            ),
+            fix_hint=(
+                "Re-enable EgressPolicy(block_private_addresses=True) "
+                "and use OutboundRule(allow_private=True) for the "
+                "specific rule that needs an internal destination."
+            ),
+        ))
+    else:
+        report.add(AuditFinding(
+            check_id="egress.ssrf_block_enabled",
+            severity="ok",
+            title="EgressPolicy.block_private_addresses=True",
+            detail=(
+                "Loopback / RFC1918 / link-local / reserved / "
+                "multicast / cloud-metadata destinations are refused "
+                "before the allowlist runs."
+            ),
+        ))
+
+    # Outbound secret scan posture.
+    secret_action = getattr(policy, "outbound_secret_action", "warn")
+    if secret_action == "off":
+        report.add(AuditFinding(
+            check_id="egress.secret_scan_off",
+            severity="warn",
+            title="EgressPolicy.outbound_secret_action='off'",
+            detail=(
+                "Outbound payloads are not scanned for credential "
+                "shapes (GitHub PAT, AWS keys, OAuth bearer tokens, "
+                "etc.). A buggy tool that writes a token into the "
+                "wrong webhook URL will not be caught here."
+            ),
+            fix_hint='Set outbound_secret_action="warn" (audit) or '
+                     '"block" (refuse) at minimum.',
+        ))
+    elif secret_action == "warn":
+        report.add(AuditFinding(
+            check_id="egress.secret_scan_warn",
+            severity="info",
+            title='outbound_secret_action="warn"',
+            detail=(
+                "Credential-shape hits are logged but the request is "
+                "still sent. Recommended starting posture; flip to "
+                "'block' once you've verified zero false positives "
+                "on legitimate traffic."
+            ),
+        ))
+    else:  # block
+        report.add(AuditFinding(
+            check_id="egress.secret_scan_block",
+            severity="ok",
+            title='outbound_secret_action="block"',
+            detail="Outbound requests with credential shapes refused.",
+        ))
+
+    # ``allow_private`` opt-outs are auditable surface; list them so a
+    # reviewer sees who can reach private destinations.
+    private_optouts = [
+        rule for rule in policy.rules if getattr(rule, "allow_private", False)
+    ]
+    if private_optouts:
+        for i, rule in enumerate(policy.rules):
+            if getattr(rule, "allow_private", False):
+                report.add(AuditFinding(
+                    check_id=f"egress.rule_{i}.allow_private",
+                    severity="warn",
+                    title=(
+                        f"rule '{rule.host_pattern}' has "
+                        f"allow_private=True"
+                    ),
+                    detail=(
+                        "This rule may reach RFC1918 / loopback / "
+                        "link-local destinations. Acceptable for an "
+                        "explicitly internal API; review the caller "
+                        f"({rule.caller!r}) and the host pattern."
+                    ),
+                ))
+
     for i, rule in enumerate(policy.rules):
         if "http" in rule.allowed_schemes and "https" not in rule.allowed_schemes:
             report.add(AuditFinding(

@@ -32,6 +32,10 @@ class SandboxExecutionRequest:
     # and refuses on mismatch. ``None`` = no pin requested. Set from
     # ``AgentPolicy.image_digest`` by the tool runtime.
     image_digest: str | None = None
+    # Per-call capability envelope for sidecar component-model tools. The
+    # Python process forwards this to the sidecar, but the Rust sidecar is the
+    # enforcement boundary that allows or denies each imported capability.
+    capabilities: dict[str, Any] | None = None
 
 
 @dataclass

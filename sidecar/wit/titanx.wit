@@ -1,0 +1,33 @@
+package titanx:tool@0.2.0;
+
+interface env {
+    get-env: func(key: string) -> option<string>;
+}
+
+interface http {
+    record response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    variant error {
+        denied(string),
+        timeout,
+        transport(string),
+    }
+
+    get: func(url: string) -> result<response, error>;
+}
+
+interface fs {
+    read-file: func(path: string) -> result<list<u8>, string>;
+}
+
+world tool {
+    import env;
+    import http;
+    import fs;
+
+    export run: func() -> result<string, string>;
+}

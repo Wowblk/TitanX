@@ -48,11 +48,14 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import inspect
+import ipaddress
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Iterable, Iterator, Literal
 from urllib.parse import urlsplit
+
+from .secret_scan import OutboundSecretScanner, ScanResult, SecretScanAction
 
 
 # ── Contextvar-backed caller scope ────────────────────────────────────────
@@ -111,6 +114,173 @@ def _resolve_caller(explicit: str | None) -> str | None:
         return explicit
     ambient = _CURRENT_CALLER.get()
     return ambient or None
+
+
+# ── SSRF private-address classification ───────────────────────────────────
+#
+# A default-deny allowlist alone does not stop SSRF: an operator who allows
+# ``*.example.com`` or ``"*"`` (advisory mode) still ships a guard that
+# happily lets a tool reach ``http://169.254.169.254/`` (cloud metadata),
+# ``http://10.0.0.5:8080/`` (internal admin), or ``http://localhost:6379``
+# (Redis). The classic SSRF chain in real incidents is "external API name
+# resolves to RFC1918 / link-local / loopback → tool reads admin
+# endpoint" — the allowlist never had a chance because the host *name*
+# was on it.
+#
+# OpenClaw's posture is to refuse private destinations *before* the
+# allowlist runs. We mirror that as a default-on flag on ``EgressPolicy``.
+# Per-rule opt-out (``OutboundRule.allow_private``) exists for the small
+# set of legitimate cases (a self-hosted internal API the agent must
+# reach, a developer running everything on localhost). Opting out is
+# audit-visible and the audit module flags the absence of the global
+# block as a warning.
+#
+# The blocklist is encoded as ``ipaddress`` networks. We rely on the
+# stdlib's ``is_private``/``is_loopback``/``is_link_local`` properties
+# for the broad RFC1918-style ranges and add explicit entries for cloud
+# metadata addresses where the property doesn't already cover them
+# (e.g. AWS ``169.254.169.254`` *is* link-local so it's caught, but
+# operators sometimes resolve hosts that *aren't* literal IPs).
+#
+# IPv6 is checked the same way: ``::1``, ``fc00::/7`` (ULA), ``fe80::/10``
+# (link-local), ``::ffff:0:0/96`` (v4-mapped — we re-check the embedded
+# v4) all collapse via the same ``is_private`` etc. checks.
+
+# Cloud-metadata host names that should be refused even when they are
+# NOT literal IPs (e.g. ``metadata.google.internal``). Comparison is
+# case-insensitive against the request authority. The list is short on
+# purpose — adding too many heuristics turns the deny into a guessing
+# game. Operators with weirder metadata endpoints can extend via
+# ``EgressPolicy.extra_blocked_hosts``.
+_DEFAULT_METADATA_HOSTNAMES: frozenset[str] = frozenset({
+    "metadata.google.internal",            # GCE
+    "metadata",                            # GCE short
+    "metadata.goog",                       # GCE alias
+    "instance-data",                       # EC2 short
+    "instance-data.ec2.internal",          # EC2
+    "metadata.azure.com",                  # Azure
+    "metadata.packet.net",                 # Equinix Metal
+})
+
+
+@dataclass(frozen=True)
+class PrivateAddressDecision:
+    """Outcome of the pre-allowlist private-destination check.
+
+    ``blocked`` is the boolean the guard branches on; ``reason`` and
+    ``category`` are surfaced into the ``EgressDecision`` so audit
+    consumers can distinguish "no matching rule" from "blocked by
+    SSRF guard" without parsing free text.
+    """
+
+    blocked: bool
+    reason: str = ""
+    # ``"loopback"`` / ``"private"`` / ``"link_local"`` / ``"reserved"`` /
+    # ``"multicast"`` / ``"metadata_host"`` / ``""`` (not blocked).
+    category: str = ""
+
+
+def _classify_address(host: str) -> PrivateAddressDecision:
+    """Return a deny decision if ``host`` resolves to a private/reserved IP.
+
+    ``host`` is the URL authority (no port). The function does NOT
+    perform DNS resolution: relying on the resolver here invites two
+    different attacks. (1) DNS rebinding — the address resolved at
+    decision time differs from the one used by the HTTP client. (2)
+    Time-of-check/time-of-use — even without rebinding, a short-TTL
+    record can flip mid-flight. The correct place to enforce IP-level
+    blocking is at the socket layer, which the SDK does not own.
+    What we *can* do here is reject the easy cases:
+
+    - The request URL contains a literal IP. We classify it directly.
+    - The hostname itself looks like a metadata sentinel. We refuse it
+      even though we don't know the resolution result.
+
+    Hosts that don't trip either branch fall through to the allowlist,
+    and the operator is expected to supply a host-IP allowlist or run
+    the workload through a sandbox with no network access at all
+    (``--network=none`` or equivalent) for harder guarantees.
+    """
+    if not host:
+        return PrivateAddressDecision(blocked=False)
+
+    lowered = host.strip().lower()
+
+    # Bracket-stripped IPv6 literal.
+    if lowered.startswith("[") and lowered.endswith("]"):
+        lowered = lowered[1:-1]
+
+    if lowered in _DEFAULT_METADATA_HOSTNAMES:
+        return PrivateAddressDecision(
+            blocked=True,
+            reason=f"refusing cloud-metadata sentinel host {lowered!r}",
+            category="metadata_host",
+        )
+
+    # Try literal IP. If it parses, classify. If not, fall through —
+    # we deliberately do not resolve. Note ``ip_address`` raises on
+    # leading zeros in v4 octets which is fine; "010.0.0.1" is not a
+    # canonical address and modern resolvers reject it.
+    try:
+        addr = ipaddress.ip_address(lowered)
+    except ValueError:
+        return PrivateAddressDecision(blocked=False)
+
+    if addr.is_loopback:
+        return PrivateAddressDecision(
+            blocked=True,
+            reason=f"refusing loopback address {addr}",
+            category="loopback",
+        )
+    if addr.is_link_local:
+        return PrivateAddressDecision(
+            blocked=True,
+            reason=f"refusing link-local address {addr}",
+            category="link_local",
+        )
+    if addr.is_private:
+        return PrivateAddressDecision(
+            blocked=True,
+            reason=f"refusing private address {addr}",
+            category="private",
+        )
+    if addr.is_multicast:
+        return PrivateAddressDecision(
+            blocked=True,
+            reason=f"refusing multicast address {addr}",
+            category="multicast",
+        )
+    if addr.is_reserved or addr.is_unspecified:
+        return PrivateAddressDecision(
+            blocked=True,
+            reason=f"refusing reserved/unspecified address {addr}",
+            category="reserved",
+        )
+
+    # Carrier-grade NAT 100.64.0.0/10 is not flagged by ``is_private``
+    # in older Python releases. Re-check explicitly.
+    if isinstance(addr, ipaddress.IPv4Address):
+        cgnat = ipaddress.IPv4Network("100.64.0.0/10")
+        if addr in cgnat:
+            return PrivateAddressDecision(
+                blocked=True,
+                reason=f"refusing CGNAT address {addr}",
+                category="private",
+            )
+
+    # IPv4-mapped IPv6 (``::ffff:10.0.0.1``) — re-check the embedded
+    # v4. ``ipaddress`` already classifies these via the v4 view but
+    # only on Python 3.12+. Be explicit so the behaviour is uniform.
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        v4 = addr.ipv4_mapped
+        if v4.is_loopback or v4.is_link_local or v4.is_private:
+            return PrivateAddressDecision(
+                blocked=True,
+                reason=f"refusing IPv4-mapped private address {addr}",
+                category="private",
+            )
+
+    return PrivateAddressDecision(blocked=False)
 
 
 # ── Public types ──────────────────────────────────────────────────────────
@@ -176,6 +346,14 @@ class OutboundRule:
     allowed_schemes: tuple[str, ...] = ("https",)
     allowed_ports: tuple[int, ...] = ()
     caller: str | None = None
+    # Per-rule opt-out for the SSRF private-destination block. ``False``
+    # (default) inherits ``EgressPolicy.block_private_addresses`` —
+    # i.e. the global block applies. Set to ``True`` only for rules
+    # that intentionally target a host that resolves to RFC1918 (a
+    # self-hosted internal API the agent must reach, a developer
+    # running everything on localhost). Auditing flags every rule
+    # with this flag so a reviewer sees the surface.
+    allow_private: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.host_pattern, str) or not self.host_pattern:
@@ -208,6 +386,19 @@ class EgressDecision:
     method: str = ""
     scheme: str = ""
     caller: str | None = None
+    # ``"loopback"`` / ``"private"`` / ``"link_local"`` / ``"reserved"`` /
+    # ``"multicast"`` / ``"metadata_host"`` when the SSRF check fired,
+    # otherwise empty. Lets audit consumers branch on the *kind* of
+    # SSRF block without parsing free-form ``reason`` text.
+    private_address_category: str = ""
+    # When the outbound secret scanner ran and matched, the names of
+    # the patterns that fired (``("github_pat", "bearer_token")``).
+    # The matched substrings themselves are intentionally NOT stored:
+    # putting a leaked credential into an audit entry just moves the
+    # problem one log file over. ``()`` means either the scanner did
+    # not run (``outbound_secret_action="off"`` or ``enforce`` not
+    # called) or it ran and found nothing.
+    secret_matches: tuple[str, ...] = ()
 
 
 @dataclass
@@ -216,10 +407,38 @@ class EgressPolicy:
 
     The default is ``"deny"``. We strongly recommend leaving it at
     deny; flipping to ``"allow"`` makes the guard advisory only.
+
+    ``block_private_addresses`` is the SSRF guard: when ``True``
+    (default), any URL whose host is a literal RFC1918 / loopback /
+    link-local / reserved / multicast IP, or a known cloud-metadata
+    sentinel hostname, is refused **before** the allowlist runs. This
+    closes the classic SSRF chain where an allowed external host name
+    secretly resolves to an internal admin endpoint. Operators who
+    legitimately need to reach a private destination should leave the
+    global flag on and opt the *specific* rule in via
+    ``OutboundRule.allow_private=True`` so the surface remains
+    auditable.
+
+    ``extra_blocked_hostnames`` extends the metadata-sentinel list. The
+    bundled defaults cover AWS / GCE / Azure / Equinix; add operator-
+    specific names (e.g. an internal jumphost) here to refuse them
+    early without writing a new rule.
     """
 
     rules: list[OutboundRule] = field(default_factory=list)
     default_action: EgressAction = "deny"
+    block_private_addresses: bool = True
+    extra_blocked_hostnames: tuple[str, ...] = ()
+    # What to do when ``OutboundSecretScanner`` finds a credential
+    # shape in the URL / headers / body of an outbound request.
+    # ``"warn"`` (default) records the finding via the audit hook but
+    # still lets the request go through, because a regex hit is
+    # *probabilistic* and a false positive on a customer webhook is
+    # operationally worse than a missed exfil. ``"block"`` is the
+    # tighter posture — recommended once an operator has run with
+    # ``warn`` long enough to know the pattern set has zero hits on
+    # legitimate traffic. ``"off"`` skips the scan entirely.
+    outbound_secret_action: SecretScanAction = "warn"
 
     def add(self, rule: OutboundRule) -> None:
         self.rules.append(rule)
@@ -239,13 +458,29 @@ class EgressGuard:
         policy: EgressPolicy,
         *,
         audit_hook: EgressAuditHook | None = None,
+        secret_scanner: OutboundSecretScanner | None = None,
     ) -> None:
         self._policy = policy
         self._audit_hook = audit_hook
+        # Default scanner gives every guard a credential check without
+        # forcing every host to instantiate one. Operators who want to
+        # extend the pattern catalogue pass a pre-built scanner via the
+        # kwarg; ``None`` here means the policy turns the scan off
+        # entirely (``outbound_secret_action="off"``), in which case
+        # ``enforce`` short-circuits the scan.
+        self._secret_scanner = (
+            secret_scanner
+            if secret_scanner is not None
+            else OutboundSecretScanner()
+        )
 
     @property
     def policy(self) -> EgressPolicy:
         return self._policy
+
+    @property
+    def secret_scanner(self) -> OutboundSecretScanner:
+        return self._secret_scanner
 
     # ── factories ────────────────────────────────────────────────────────
 
@@ -340,6 +575,41 @@ class EgressGuard:
                 caller=caller_id,
             )
 
+        # SSRF pre-allowlist filter. Runs *before* the rule loop so a
+        # rule that allows ``*.example.com`` cannot accidentally
+        # whitelist ``http://169.254.169.254/`` because the operator
+        # stuffed an A record. ``allow_private=True`` on a matched
+        # rule overrides; we walk the rules once just to find such an
+        # opt-out, then apply the block.
+        ssrf = self._private_check(host)
+        if ssrf.blocked:
+            override = self._private_override_rule(
+                host, path, method, scheme, port, caller_id,
+            )
+            if override is not None:
+                # The opt-out rule itself becomes the matched rule
+                # below, but we still surface that the block was
+                # consciously bypassed via the category field.
+                return EgressDecision(
+                    allowed=True,
+                    reason=(
+                        f"matched rule host={override.host_pattern} "
+                        f"path={override.path_prefix} "
+                        f"(private destination opt-in: {ssrf.category})"
+                    ),
+                    matched_rule=override,
+                    host=host, path=path, method=method, scheme=scheme,
+                    caller=caller_id,
+                    private_address_category=ssrf.category,
+                )
+            return EgressDecision(
+                allowed=False,
+                reason=ssrf.reason,
+                host=host, path=path, method=method, scheme=scheme,
+                caller=caller_id,
+                private_address_category=ssrf.category,
+            )
+
         for rule in self._policy.rules:
             if not _caller_matches(caller_id, rule.caller):
                 continue
@@ -375,6 +645,64 @@ class EgressGuard:
             host=host, path=path, method=method, scheme=scheme,
             caller=caller_id,
         )
+
+    # ── SSRF private-destination plumbing ────────────────────────────────
+
+    def _private_check(self, host: str) -> PrivateAddressDecision:
+        """Apply the policy-level SSRF check to ``host``.
+
+        Returns a non-blocked decision when ``block_private_addresses``
+        is off so the caller can short-circuit cleanly.
+        """
+        if not self._policy.block_private_addresses:
+            return PrivateAddressDecision(blocked=False)
+        decision = _classify_address(host)
+        if decision.blocked:
+            return decision
+        # Operator-extended sentinel list. We compare on the lowered
+        # host (no port) which the caller already produced.
+        extras = {h.lower() for h in self._policy.extra_blocked_hostnames}
+        if host.lower() in extras:
+            return PrivateAddressDecision(
+                blocked=True,
+                reason=f"refusing operator-blocked host {host!r}",
+                category="metadata_host",
+            )
+        return PrivateAddressDecision(blocked=False)
+
+    def _private_override_rule(
+        self,
+        host: str,
+        path: str,
+        method: str,
+        scheme: str,
+        port: int | None,
+        caller_id: str | None,
+    ) -> OutboundRule | None:
+        """Return the first ``allow_private`` rule that fully matches
+        the request, or ``None`` if no such rule exists.
+
+        We deliberately re-run the same matchers here instead of
+        moving them up: the SSRF block is a *fast path* deny, and we
+        only need to scan rules at all when the block fires.
+        """
+        for rule in self._policy.rules:
+            if not rule.allow_private:
+                continue
+            if not _caller_matches(caller_id, rule.caller):
+                continue
+            if not _scheme_matches(scheme, rule.allowed_schemes):
+                continue
+            if not _host_matches(host, rule.host_pattern):
+                continue
+            if not _path_matches(path, rule.path_prefix):
+                continue
+            if not _method_matches(method, rule.methods):
+                continue
+            if rule.allowed_ports and (port not in rule.allowed_ports):
+                continue
+            return rule
+        return None
 
     def check_url(
         self,
@@ -442,14 +770,88 @@ class EgressGuard:
         method: str = "GET",
         *,
         caller: str | None = None,
+        headers: dict[str, str] | None = None,
+        body: str | bytes | None = None,
     ) -> EgressDecision:
         """Audit + raise on deny.
 
         Convenience wrapper for tool authors who want a one-liner. The
         guard fires the audit hook on every call (allow and deny), and
         raises ``EgressDenied`` when the decision is deny.
+
+        ``headers`` and ``body`` are scanned for credential shapes when
+        the policy's ``outbound_secret_action`` is not ``"off"``. The
+        scan happens **after** the allowlist check: a request that the
+        allowlist already refused does not need a payload scan, and a
+        deny decision that *also* mentions secrets in its audit entry
+        is more confusing than helpful for the operator.
+
+        On a secret hit:
+
+        - ``outbound_secret_action="block"`` upgrades the decision to
+          deny and raises ``EgressDenied``. The audit hook fires once
+          with the upgraded decision so the forensic trail is single.
+        - ``outbound_secret_action="warn"`` leaves the decision
+          ``allow`` but populates ``decision.secret_matches`` so the
+          audit hook can record the finding. The request still goes
+          through; the operator reviews the audit log out-of-band.
+
+        The matched substrings themselves are deliberately omitted
+        from the decision and the audit payload — exfiltrating a
+        credential into a log file the audit consumer reads is the
+        same problem with a different colour.
         """
-        decision = await self.check_url_async(url, method, caller=caller)
+        decision = self.check_url(url, method, caller=caller)
+
+        # SSRF + allowlist already settled the decision; only run the
+        # secret scanner when the request was going to be allowed.
+        # Scanning denied requests would just spend cycles without any
+        # change in outcome.
+        if (
+            decision.allowed
+            and self._policy.outbound_secret_action != "off"
+        ):
+            scan = self._secret_scanner.scan_request(
+                url=url,
+                headers=headers,
+                body=body,
+            )
+            if scan.hit:
+                names = tuple(sorted({m.pattern_name for m in scan.matches}))
+                if self._policy.outbound_secret_action == "block":
+                    decision = EgressDecision(
+                        allowed=False,
+                        reason=(
+                            "outbound payload contains credential shapes: "
+                            + ", ".join(names)
+                        ),
+                        matched_rule=decision.matched_rule,
+                        host=decision.host,
+                        path=decision.path,
+                        method=decision.method,
+                        scheme=decision.scheme,
+                        caller=decision.caller,
+                        private_address_category=decision.private_address_category,
+                        secret_matches=names,
+                    )
+                else:  # warn
+                    decision = EgressDecision(
+                        allowed=True,
+                        reason=(
+                            decision.reason
+                            + " [secret-scan: " + ", ".join(names) + "]"
+                        ),
+                        matched_rule=decision.matched_rule,
+                        host=decision.host,
+                        path=decision.path,
+                        method=decision.method,
+                        scheme=decision.scheme,
+                        caller=decision.caller,
+                        private_address_category=decision.private_address_category,
+                        secret_matches=names,
+                    )
+
+        await self._fire_audit(decision)
         if not decision.allowed:
             raise EgressDenied(decision)
         return decision
@@ -501,12 +903,15 @@ def audit_log_egress_hook(audit_log: Any, *, actor: str = "system") -> EgressAud
                 "method": decision.method,
                 "scheme": decision.scheme,
                 "caller": decision.caller,
+                "private_address_category": decision.private_address_category or None,
+                "secret_matches": list(decision.secret_matches) or None,
                 "matched_rule": (
                     {
                         "host_pattern": decision.matched_rule.host_pattern,
                         "path_prefix": decision.matched_rule.path_prefix,
                         "methods": list(decision.matched_rule.methods),
                         "caller": decision.matched_rule.caller,
+                        "allow_private": decision.matched_rule.allow_private,
                     }
                     if decision.matched_rule
                     else None
@@ -591,6 +996,7 @@ __all__ = [
     "EgressGuard",
     "EgressPolicy",
     "OutboundRule",
+    "PrivateAddressDecision",
     "audit_log_egress_hook",
     "caller_scope",
     "current_caller",

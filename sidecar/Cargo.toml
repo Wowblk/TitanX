@@ -1,0 +1,45 @@
+[package]
+name = "titanx-sidecar"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.78"
+description = "Process-isolated WASM tool runtime for TitanX (RFC: docs/sidecar-rfc.md)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "titanx-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime — using the smallest feature set we need: stdio + signals.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "process", "time", "signal"] }
+
+# WebAssembly engine. Using a recent wasmtime that supports per-store
+# fuel and memory limits. Component-model support is opt-in via a
+# feature flag and is not enabled in v1; see docs/sidecar-rfc.md.
+wasmtime = { version = "27", default-features = false, features = ["async", "component-model", "cranelift", "runtime", "cache"] }
+wasmtime-wasi = "27"
+
+# Serde for the IPC envelope. We pin a recent serde_json so number
+# parsing is deterministic across host architectures.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Base64 for the inline-module-bytes field of `execute`.
+base64 = "0.22"
+
+# Anyhow on the error path inside `main`. The protocol surfaces typed
+# error codes; anyhow is just for collapsing the internal Result chain.
+anyhow = "1"
+async-trait = "0.1"
+
+[profile.release]
+# A sidecar that crashes silently is worse than one that panics
+# loudly: a panic shows up as a non-zero exit code which the Python
+# adapter converts to a tool error. ``panic = "abort"`` shrinks the
+# binary and avoids the unwinding-across-FFI footgun.
+panic = "abort"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

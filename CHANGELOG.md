@@ -11,6 +11,50 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Added
 
+- **SSRF private-destination block** — `EgressPolicy.block_private_addresses`
+  (default `True`) refuses outbound URLs whose authority resolves to
+  literal RFC1918 / loopback / link-local / CGNAT / multicast /
+  reserved IPs, or to a known cloud-metadata sentinel hostname
+  (`metadata.google.internal`, `instance-data`, `metadata.azure.com`,
+  …). The check runs **before** the allowlist so a rule that matches
+  `*.example.com` cannot accidentally permit reaching
+  `169.254.169.254` because of a hostile DNS record. Per-rule opt-out
+  via `OutboundRule.allow_private=True` (auditable; flagged by
+  `audit_egress_policy`). Operator-extended sentinels via
+  `EgressPolicy.extra_blocked_hostnames`. Decision exposes
+  `private_address_category` so audit consumers can branch on the
+  *kind* of SSRF block.
+- **Outbound secret scan** — `OutboundSecretScanner` inspects URL +
+  headers + body of an `EgressGuard.enforce(...)` call and detects
+  vendor-specific credential shapes (GitHub PAT, AWS access/secret
+  key, Slack/Stripe/JWT/Bearer/private-key/Anthropic/OpenAI/Google/
+  SendGrid). `EgressPolicy.outbound_secret_action` ∈
+  `{"warn", "block", "off"}` (default `"warn"`) controls whether a
+  hit downgrades the decision to deny or just adds a finding to the
+  audit hook. Matched values are deliberately not stored in the
+  decision or audit payload — only the pattern names — so the audit
+  log does not become its own exfil path.
+- **Audit additions for SSRF + secret scan** —
+  `audit_egress_policy` now reports
+  `block_private_addresses` posture (critical when off),
+  `outbound_secret_action` posture (info/warn/ok), and lists every
+  `OutboundRule` with `allow_private=True` so a reviewer can see the
+  surface.
+- **Sidecar WASM backend (skeleton)** — `titanx-sidecar` Rust crate
+  at `sidecar/` plus Python adapter
+  `titanx.sandbox.backends.SidecarSandboxBackend`. Tools execute in a
+  separate OS process, isolating the agent's heap from a hostile or
+  miscompiled WASM module. The Rust binary registers WASI preview1
+  only — `wasi-sockets` and `wasi-http` imports fail at instantiation
+  (structural network deny). Per-call `memory_bytes`, `fuel`, and
+  `wall_clock_ms` enforced in both processes. NDJSON over stdin/
+  stdout for IPC; protocol envelope and error codes documented in
+  `docs/sidecar-rfc.md`. v0.1.0 ships preview1; the WIT
+  capability-handle path is sketched in `sidecar/wit/titanx.wit` and
+  scheduled for a follow-up. The Python adapter is fully tested
+  against a scripted fake; the Rust crate's tests are present but
+  the build system is not wired (operator runs `cargo build
+  --release` themselves).
 - **NemoClaw-parity sandbox hardening** — `AgentPolicy` gains
   `allowed_read_paths` (host paths the workload may read but not
   write; bind-mounted `:ro` by `DockerSandboxBackend`) and
