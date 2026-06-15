@@ -1,13 +1,42 @@
 from __future__ import annotations
 
 import os
+import shlex
 from dataclasses import dataclass
 from typing import Any, Callable
+from uuid import uuid4
 
 from ..types import ToolDefinition, ToolExecutionResult, ToolRuntime
 from .path_guard import is_path_allowed, scan_shell_write_targets
 from .router import SandboxRouter
-from .types import SandboxExecutionRequest, SandboxRouterInput, SandboxToolPolicy
+from .session_manager import SandboxSessionManager
+from .types import (
+    SandboxExecutionRequest,
+    SandboxExecutionResult,
+    SandboxRouterInput,
+    SandboxToolPolicy,
+)
+
+_LONG_RUNNING_COMMAND_MARKERS = (
+    " --watch",
+    " -w",
+    " --reload",
+    " --host",
+    " --follow",
+    " -f",
+    " watch ",
+    " tail -f",
+    "docker logs -f",
+    "while true",
+)
+
+_LONG_RUNNING_EXECUTABLES = {
+    "celery",
+    "jupyter",
+    "postgres",
+    "postgresql",
+    "redis-server",
+}
 
 
 @dataclass
@@ -32,6 +61,11 @@ class SandboxedToolRuntime(ToolRuntime):
         self._handlers: dict[str, SandboxedToolHandler] = {h.definition.name: h for h in handlers}
         self._allowed_write_paths = allowed_write_paths
         self._policy_store = policy_store
+        self._sessions = SandboxSessionManager(
+            router,
+            allowed_write_paths=allowed_write_paths,
+            policy_store=policy_store,
+        )
 
     def list_tools(self) -> list[ToolDefinition]:
         return [h.definition for h in self._handlers.values()]
@@ -75,9 +109,64 @@ class SandboxedToolRuntime(ToolRuntime):
                 req.image_digest = live_policy.image_digest
 
         router_input = self._policy_to_router_input(handler.policy)
+        session_id = _string_param(params.get("sessionId"))
+        if session_id:
+            result = await self._sessions.execute(session_id, req)
+            return self._format_result(result.backend, result)
+
+        if self._should_background(name, params, req):
+            return await self._start_background_session(req, router_input)
+
         selection = await self._router.select(router_input)
         result = await selection.backend.execute(req)
-        prefix = f"[sandbox:{selection.backend.kind}]"
+        return self._format_result(selection.backend.kind, result)
+
+    async def _start_background_session(
+        self,
+        req: SandboxExecutionRequest,
+        router_input: SandboxRouterInput,
+    ) -> ToolExecutionResult:
+        # Background commands need a persistent Unix-like execution
+        # environment. Refuse WASM fallback instead of starting a
+        # "background" workload on a stateless backend that cannot be
+        # polled or cleaned up.
+        router_input.min_isolation = router_input.min_isolation or "docker"
+        session = await self._sessions.create(
+            router_input,
+            metadata={"purpose": "background-command"},
+        )
+        run_id = uuid4().hex[:12]
+        log_path = f"/tmp/titanx-bg/{run_id}.log"
+        status_path = f"/tmp/titanx-bg/{run_id}.status"
+        pid_path = f"/tmp/titanx-bg/{run_id}.pid"
+        script = _background_script(req, log_path, status_path, pid_path)
+        bg_req = SandboxExecutionRequest(
+            command="sh",
+            args=["-c", script],
+            env=req.env,
+            timeout_ms=5_000,
+            allowed_write_paths=req.allowed_write_paths,
+            allowed_read_paths=req.allowed_read_paths,
+            image_digest=req.image_digest,
+        )
+        result = await self._sessions.execute(session.id, bg_req)
+        if result.exit_code != 0:
+            return self._format_result(result.backend, result)
+        return ToolExecutionResult(
+            output=(
+                f"[sandbox:{result.backend}] Command still running "
+                f"(sessionId={session.id}).\n"
+                f"{result.stdout.strip()}\n"
+                f"log={log_path}\n"
+                f"status={status_path}\n"
+                "Use run_command with this sessionId to inspect logs, "
+                "check status, or kill the recorded pid."
+            ),
+            error=None,
+        )
+
+    def _format_result(self, backend: str, result: SandboxExecutionResult) -> ToolExecutionResult:
+        prefix = f"[sandbox:{backend}]"
         content = (
             f"{prefix} {result.stdout}".strip()
             if result.stdout.strip()
@@ -87,6 +176,20 @@ class SandboxedToolRuntime(ToolRuntime):
             output=content,
             error=result.stderr or f"exit_code_{result.exit_code}" if result.exit_code != 0 else None,
         )
+
+    def _should_background(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        req: SandboxExecutionRequest,
+    ) -> bool:
+        if tool_name != "run_command":
+            return False
+        if params.get("background") is True:
+            return True
+        if isinstance(params.get("yieldMs"), int):
+            return True
+        return _looks_long_running(req)
 
     def _check_write_paths(self, req: SandboxExecutionRequest, allowed: list[str]) -> str | None:
         if req.cwd:
@@ -118,3 +221,68 @@ class SandboxedToolRuntime(ToolRuntime):
             needs_browser=policy.needs_browser,
             needs_package_install=policy.needs_package_install,
         )
+
+
+def _string_param(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
+def _looks_long_running(req: SandboxExecutionRequest) -> bool:
+    executable = os.path.basename(req.command.strip())
+    if executable in _LONG_RUNNING_EXECUTABLES:
+        return True
+
+    tokens = [req.command, *req.args]
+    command_line = " ".join(str(t) for t in tokens).strip().lower()
+    padded = f" {command_line} "
+    if any(marker in padded for marker in _LONG_RUNNING_COMMAND_MARKERS):
+        return True
+
+    # Common framework forms where the executable itself is short but
+    # the subcommand starts a server or watcher.
+    if executable in {"npm", "pnpm", "yarn", "bun"} and any(
+        arg in {"dev", "serve", "start"} for arg in req.args
+    ):
+        return True
+    if executable in {"python", "python3"} and req.args[:2] == ["-m", "http.server"]:
+        return True
+    if executable in {"uvicorn", "gunicorn", "fastapi", "flask", "streamlit"}:
+        return True
+    if executable in {"pytest", "jest", "vitest"} and any(
+        arg in {"--watch", "-w", "--watchAll"} for arg in req.args
+    ):
+        return True
+    return False
+
+
+def _background_script(
+    req: SandboxExecutionRequest,
+    log_path: str,
+    status_path: str,
+    pid_path: str,
+) -> str:
+    argv = " ".join(shlex.quote(part) for part in [req.command, *req.args])
+    body = argv
+    if req.cwd:
+        body = f"cd {shlex.quote(req.cwd)} && {argv}"
+    return "\n".join(
+        [
+            "set -u",
+            "mkdir -p /tmp/titanx-bg",
+            f"log={shlex.quote(log_path)}",
+            f"status={shlex.quote(status_path)}",
+            f"pidfile={shlex.quote(pid_path)}",
+            "(",
+            "  set +e",
+            f"  {body}",
+            "  code=$?",
+            '  printf "%s\\n" "$code" > "$status"',
+            ') > "$log" 2>&1 &',
+            "pid=$!",
+            'printf "%s\\n" "$pid" > "$pidfile"',
+            'printf "pid=%s\\npidfile=%s\\n" "$pid" "$pidfile"',
+        ]
+    )

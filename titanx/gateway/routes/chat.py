@@ -44,6 +44,17 @@ def _check_api_key(provided: str | None, expected: str | None) -> bool:
     return hmac.compare_digest(provided, expected)
 
 
+def _set_runtime_hooks(runtime: object, hooks: RuntimeHooks) -> None:
+    set_hooks = getattr(runtime, "set_hooks", None)
+    if callable(set_hooks):
+        set_hooks(hooks)
+    else:
+        # Backward-compatible escape hatch for custom AgentRuntime-like
+        # objects that predate ``set_hooks`` but still keep hooks on the
+        # conventional private slot.
+        setattr(runtime, "_hooks", hooks)
+
+
 def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter:
     router = APIRouter()
 
@@ -78,7 +89,7 @@ def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter
             # session_id. Without it, concurrent POSTs for the same
             # session would race on AgentState — see SessionEntry
             # docstring.
-            task = asyncio.create_task(_run_and_close(entry, message, queue))
+            task = asyncio.create_task(_run_and_close(entry, message, queue, hooks))
             try:
                 while True:
                     item = await queue.get()
@@ -99,9 +110,15 @@ def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter
 
         return StreamingResponse(stream(), media_type="text/event-stream")
 
-    async def _run_and_close(entry: SessionEntry, message: str, queue: asyncio.Queue) -> None:
+    async def _run_and_close(
+        entry: SessionEntry,
+        message: str,
+        queue: asyncio.Queue,
+        hooks: RuntimeHooks,
+    ) -> None:
         try:
             async with entry.lock:
+                _set_runtime_hooks(entry.runtime, hooks)
                 entry.touch()
                 await entry.runtime.run_prompt(message)
         except asyncio.CancelledError:
@@ -169,7 +186,7 @@ def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter
                 if msg_type == "message":
                     pump_task = asyncio.create_task(pump_events())
                     run_task = asyncio.create_task(
-                        _run_and_close_ws(entry, data.get("message", ""), queue)
+                        _run_and_close_ws(entry, data.get("message", ""), queue, hooks)
                     )
                     await asyncio.gather(pump_task, run_task)
 
@@ -179,9 +196,15 @@ def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter
         except WebSocketDisconnect:
             pass
 
-    async def _run_and_close_ws(entry: SessionEntry, message: str, queue: asyncio.Queue) -> None:
+    async def _run_and_close_ws(
+        entry: SessionEntry,
+        message: str,
+        queue: asyncio.Queue,
+        hooks: RuntimeHooks,
+    ) -> None:
         try:
             async with entry.lock:
+                _set_runtime_hooks(entry.runtime, hooks)
                 entry.touch()
                 await entry.runtime.run_prompt(message)
         except asyncio.CancelledError:

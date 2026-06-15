@@ -85,7 +85,27 @@ def _default_handlers() -> list[SandboxedToolHandler]:
             definition=ToolDefinition(
                 name="run_command",
                 description="Execute a command in the selected sandbox backend.",
-                parameters={"type": "object", "properties": {"command": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}, "cwd": {"type": "string"}}, "required": ["command"]},
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "args": {"type": "array", "items": {"type": "string"}},
+                        "cwd": {"type": "string"},
+                        "background": {
+                            "type": "boolean",
+                            "description": "Start the command in a persistent sandbox session and return immediately.",
+                        },
+                        "yieldMs": {
+                            "type": "integer",
+                            "description": "Hint that the command may outlive this turn; TitanX will run it as a managed background session.",
+                        },
+                        "sessionId": {
+                            "type": "string",
+                            "description": "Run a follow-up command inside an existing sandbox session.",
+                        },
+                    },
+                    "required": ["command"],
+                },
                 requires_approval=True,
                 requires_sanitization=True,
             ),

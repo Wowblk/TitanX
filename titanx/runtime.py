@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 from datetime import datetime, timezone
 
 from .safety.egress import caller_scope
@@ -109,6 +110,9 @@ class AgentRuntime:
             blocked = [v.pattern for v in input_check.violations if v.action == "block"]
             raise ValueError(f"Unsafe input blocked: {', '.join(blocked)}")
 
+        if input_check.sanitized_content.strip().startswith("/compact"):
+            return await self._run_manual_compact(input_check.sanitized_content)
+
         user_msg = UserMessage(role="user", content=input_check.sanitized_content)
         append_message(self.state, user_msg)
 
@@ -128,6 +132,21 @@ class AgentRuntime:
         await self._emit(LoopStartEvent())
         self.state.signal = "continue"
         return await self._run_loop()
+
+    async def _run_manual_compact(self, content: str) -> AgentState:
+        """Run the same compaction pipeline for an explicit ``/compact`` command."""
+        from .types import LoopEndEvent, LoopStartEvent
+
+        if not self._compaction_options:
+            raise ValueError("Manual compaction requires compaction_options")
+
+        custom = content.strip()[len("/compact"):].strip() or None
+        self.state.needs_compaction = True
+        await self._emit(LoopStartEvent())
+        ok = await self._maybe_compact(reason="manual", custom_instructions=custom)
+        self.state.signal = "stop"
+        await self._emit(LoopEndEvent(reason="manual_compacted" if ok else "compaction_exhausted"))
+        return self.state
 
     def approve_pending_tool(self) -> None:
         """Approve the currently pending tool call.
@@ -204,6 +223,16 @@ class AgentRuntime:
         if self.state.signal != "continue":
             return self.state
         return await self._run_loop()
+
+    def set_hooks(self, hooks: RuntimeHooks | None) -> None:
+        """Replace runtime event hooks for the next host interaction.
+
+        Long-lived gateway sessions reuse one AgentRuntime across multiple
+        SSE/WebSocket requests, but each request has its own response queue.
+        Refreshing hooks before ``run_prompt`` keeps events flowing to the
+        active transport instead of a stale, already-closed stream.
+        """
+        self._hooks = hooks or RuntimeHooks()
 
     # ── Internal loop ─────────────────────────────────────────────────────────
 
@@ -298,8 +327,10 @@ class AgentRuntime:
             # as the proxy for current context size; on iteration 1 the metric
             # is 0 and the gate naturally no-ops, which is correct because
             # there's no history to compact yet.
-            if self._compaction_strategy and self._compaction_options:
-                if not await self._maybe_compact():
+            if self._compaction_options and (
+                self._compaction_strategy or self._compaction_options.enable_micro_compaction
+            ):
+                if not await self._maybe_compact(reason="auto"):
                     # Exhausted: terminate loop with explicit signal so the host
                     # doesn't keep pumping bigger and bigger contexts at the LLM.
                     self.state.signal = "stop"
@@ -351,7 +382,12 @@ class AgentRuntime:
     def _has_in_flight_batch(self) -> bool:
         return self.state.pending_tool_call_index < len(self.state.pending_tool_calls)
 
-    async def _maybe_compact(self) -> bool:
+    async def _maybe_compact(
+        self,
+        *,
+        reason: str = "auto",
+        custom_instructions: str | None = None,
+    ) -> bool:
         """Run a pre-flight compaction pass.
 
         Returns ``False`` if compaction has been exhausted (consecutive
@@ -363,18 +399,32 @@ class AgentRuntime:
         cases the loop continues normally.
         """
         from .context.compactor import auto_compact_if_needed
+        from .context.types import RuntimeStateSnapshot
         from .types import (
             CompactionExhaustedEvent,
             CompactionFailedEvent,
             CompactionTriggeredEvent,
         )
 
+        runtime_state = RuntimeStateSnapshot(
+            cwd=os.getcwd(),
+            available_tools=[tool.name for tool in self.config.available_tools],
+            current_goal=self._latest_user_content(),
+            compaction_metadata={
+                "iteration": self.state.iteration,
+                "last_response_type": self.state.last_response_type,
+                "pending_tool_calls": len(self.state.pending_tool_calls) - self.state.pending_tool_call_index,
+            },
+        )
         prev_failures = self._compaction_tracking.consecutive_failures
         compact = await auto_compact_if_needed(
             self.state,
             self._compaction_strategy,
             self._compaction_options,
             self._compaction_tracking,
+            reason=reason,  # type: ignore[arg-type]
+            runtime_state=runtime_state,
+            custom_instructions=custom_instructions,
         )
         self._compaction_tracking = compact.tracking
 
@@ -382,7 +432,20 @@ class AgentRuntime:
             await self._emit(CompactionTriggeredEvent(
                 summary=compact.result.summary,
                 ptl_attempts=compact.result.ptl_attempts,
+                reason=compact.result.reason,
+                phase=compact.result.phase,
+                trigger_reason=compact.result.trigger_reason,
+                pre_compact_tokens=compact.result.pre_compact_tokens,
+                post_compact_tokens=compact.result.post_compact_tokens,
+                projected_tokens=compact.result.projected_tokens,
+                budget=compact.result.budget,
+                messages_compacted=compact.result.messages_compacted,
+                messages_kept=compact.result.messages_kept,
+                summary_tokens=compact.result.summary_tokens,
+                strategy_name=compact.result.strategy_name,
+                duration_ms=compact.result.duration_ms,
             ))
+            await self._audit_compaction("success", compact.result.__dict__)
         elif compact.exhausted:
             # Terminal: the host needs to know we are no longer protecting
             # the budget so it can decide between "show degraded mode notice",
@@ -391,12 +454,43 @@ class AgentRuntime:
                 consecutive_failures=compact.tracking.consecutive_failures,
                 last_input_tokens=self.state.last_input_tokens,
             ))
+            await self._audit_compaction("exhausted", {
+                "reason": reason,
+                "last_input_tokens": self.state.last_input_tokens,
+                "consecutive_failures": compact.tracking.consecutive_failures,
+            })
             return False
         elif compact.tracking.consecutive_failures > prev_failures:
             await self._emit(CompactionFailedEvent(
                 consecutive_failures=compact.tracking.consecutive_failures,
+                reason=reason,
+                failure_reason=compact.failure_reason or "unknown",
+                last_input_tokens=self.state.last_input_tokens,
             ))
+            await self._audit_compaction("failed", {
+                "reason": reason,
+                "failure_reason": compact.failure_reason,
+                "consecutive_failures": compact.tracking.consecutive_failures,
+                "last_input_tokens": self.state.last_input_tokens,
+            })
         return True
+
+    def _latest_user_content(self) -> str | None:
+        for message in reversed(self.state.messages):
+            if message.role == "user":
+                return message.content
+        return None
+
+    async def _audit_compaction(self, outcome: str, details: dict) -> None:
+        from .policy import AuditEntry
+
+        await self._audit_log.append(AuditEntry(
+            timestamp=_now_iso(),
+            event="compaction",
+            actor="system",
+            reason=outcome,
+            details=details,
+        ))
 
     async def _execute_tool_calls(
         self, tool_calls: list[ToolCall] | None = None

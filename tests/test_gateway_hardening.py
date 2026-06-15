@@ -11,6 +11,7 @@ import asyncio
 
 import pytest
 
+from titanx.gateway.routes.chat import _set_runtime_hooks
 from titanx.gateway.server import _check_api_key
 from titanx.gateway.session_registry import SessionRegistry
 from titanx.types import RuntimeHooks
@@ -31,12 +32,16 @@ class TestApiKeyComparison:
 
 
 class _FakeRuntime:
-    def __init__(self, sid: str) -> None:
+    def __init__(self, sid: str, hooks: RuntimeHooks | None = None) -> None:
         self.sid = sid
+        self.hooks = hooks or RuntimeHooks()
+
+    def set_hooks(self, hooks: RuntimeHooks) -> None:
+        self.hooks = hooks
 
 
 async def _create_runtime(sid: str, hooks: RuntimeHooks) -> _FakeRuntime:
-    return _FakeRuntime(sid)
+    return _FakeRuntime(sid, hooks)
 
 
 class TestSessionRegistryBounds:
@@ -94,3 +99,23 @@ class TestSessionRegistryBounds:
 
         a, b = await asyncio.gather(request(), request())
         assert a is b
+
+
+class TestRuntimeHookRefresh:
+    async def test_reused_runtime_receives_new_request_hooks(self) -> None:
+        registry = SessionRegistry(max_sessions=10, idle_ttl_seconds=60.0)
+        first = RuntimeHooks(on_event=lambda *_: None)
+        second = RuntimeHooks(on_event=lambda *_: None)
+
+        entry = await registry.get_or_create("shared", _create_runtime, first)  # type: ignore[arg-type]
+        assert entry.runtime.hooks is first
+
+        # A second request for the same session reuses the runtime, so
+        # the gateway must refresh hooks before run_prompt. Otherwise
+        # SSE events keep going to the first request's closed queue and
+        # the second response appears to hang.
+        again = await registry.get_or_create("shared", _create_runtime, second)  # type: ignore[arg-type]
+        assert again is entry
+        _set_runtime_hooks(again.runtime, second)
+
+        assert again.runtime.hooks is second
