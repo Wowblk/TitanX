@@ -1,0 +1,269 @@
+  ✓ bitmap_free -> Should alloc and free a Bitmap 0.032ms
+  ✓ bitmap_setbit -> Should set bit with value 1/0 on multiple offsets and get bit equals to 1/0 0.076ms
+  ✓ bitmap_getbits -> Should return correct bits for empty bitmap 0.004ms
+  ✓ bitmap_getbits -> Should return correct bits for bitmap with single element 0.002ms
+  ✓ bitmap_getbits -> Should return correct bits for bitmap with multiple elements 0.002ms
+  ✓ bitmap_getbits -> Should handle single offset query 0.002ms
+  ✓ bitmap_getbits -> Should handle zero offsets 0.001ms
+  ✓ bitmap_getbits -> Should handle large offsets correctly 0.001ms
+  ✓ bitmap_getbits -> Should handle duplicate offsets in query 0.001ms
+  ✓ bitmap_getbits -> Should handle offsets in non-ascending order 0.001ms
+  ✓ bitmap_getbits -> Should work with dense bitmap 0.004ms
+  ✓ bitmap_getbits -> Should handle NULL bitmap gracefully 0.000ms
+  ✓ bitmap_from_int_array -> Should create a bitmap from a bit array and get the bit from the bitmap 0.018ms
+  ✓ bitmap_from_int_array -> Should create a bitmap from an int array and get the array from the bitmap 0.003ms
+  ✓ bitmap_from_int_array -> Should serialize 0.003ms
+  ✓ bitmap64_free -> Should alloc and free a Bitmap 0.037ms
+  ✓ bitmap64_or -> Should perform an OR between three bitmaps 0.031ms
+  ✓ bitmap64_or -> Should clear destination bitmap when passed zero bitmaps even if dest was not empty initially 0.002ms
+  ✓ bitmap64_and -> Should perform an AND between three bitmaps 0.004ms
+  ✓ bitmap64_and -> Should clear destination bitmap when passed zero bitmaps even if dest was not empty initially 0.001ms
+  ✓ bitmap64_not -> Should perform a NOT using two different methods 0.002ms
+  ✓ bitmap64_xor -> Should perform a XOR between three bitmaps 0.003ms
+  ✓ bitmap64_xor -> Should clear destination bitmap when passed zero bitmaps even if dest was not empty initially 0.001ms
+  ✓ bitmap64_range_int_array -> Basic range extraction from bitmap 0.003ms
+  ✓ bitmap64_range_int_array -> Range extraction with offset 0.001ms
+  ✓ bitmap64_range_int_array -> Large 64-bit value handling 0.001ms
+  ✓ bitmap64_range_int_array -> Early termination when requesting more than available 0.002ms
+  ✓ bitmap64_range_int_array -> Empty bitmap handling 0.001ms
+  ✓ bitmap64_range_int_array -> Offset beyond available elements 0.001ms
+  ✓ bitmap64_range_int_array -> Zero elements requested 0.001ms
+  ✓ bitmap64_range_int_array -> Single element bitmap 0.003ms
+  ✓ bitmap64_range_int_array -> Duplicate sequence test 0.002ms
+  ✓ bitmap64_getbit -> Should return true for bit that exists in bitmap 0.000ms
+  ✓ bitmap64_getbit -> Should return false for bit that does not exist in bitmap 0.001ms
+  ✓ bitmap64_getbit -> Should return false for empty bitmap 0.001ms
+  ✓ bitmap64_getbit -> Should handle offset 0 correctly when bit is set 0.001ms
+  ✓ bitmap64_getbit -> Should handle maximum uint64_t offset correctly 0.001ms
+  ✓ bitmap64_getbit -> Should handle large offset values correctly 0.001ms
+  ✓ bitmap64_getbit -> Should work with multiple bits set in bitmap 0.002ms
+  ✓ bitmap64_getbit -> Should return false after bit is removed from bitmap 0.001ms
+  ✓ bitmap64_getbits -> Should return correct bits for empty bitmap 0.001ms
+  ✓ bitmap64_getbits -> Should return correct bits for bitmap with single element 0.001ms
+  ✓ bitmap64_getbits -> Should return correct bits for bitmap with multiple elements 0.002ms
+  ✓ bitmap64_getbits -> Should handle single offset query 0.003ms
+  ✓ bitmap64_getbits -> Should handle zero offsets 0.001ms
+  ✓ bitmap64_getbits -> Should handle large offsets correctly 0.001ms
+  ✓ bitmap64_getbits -> Should handle duplicate offsets in query 0.001ms
+  ✓ bitmap64_getbits -> Should handle offsets in non-ascending order 0.003ms
+  ✓ bitmap64_getbits -> Should work with dense bitmap 0.003ms
+  ✓ bitmap64_getbits -> Should handle NULL bitmap gracefully 0.000ms
+  ✓ bitmap64_setbit -> Should set bit to true when value is true 0.001ms
+  ✓ bitmap64_setbit -> Should unset bit when value is false 0.002ms
+  ✓ bitmap64_setbit -> Should handle setting already set bit to true 0.001ms
+  ✓ bitmap64_setbit -> Should handle unsetting already unset bit 0.001ms
+  ✓ bitmap64_setbit -> Should handle offset zero 0.001ms
+  ✓ bitmap64_setbit -> Should handle large offset values 0.001ms
+  ✓ bitmap64_setbit -> Should handle maximum uint64_t offset 0.001ms
+  ✓ bitmap64_setbit -> Should handle multiple bits operations 0.004ms
+  ✓ bitmap64_setbit -> Should maintain bitmap integrity across operations 0.003ms
+  ✓ bitmap64_get_bit_array -> Should handle empty bitmap 0.002ms
+  ✓ bitmap64_get_bit_array -> Should handle single bit set at position 0 0.002ms
+  ✓ bitmap64_get_bit_array -> Should handle single bit set at higher position 0.002ms
+  ✓ bitmap64_get_bit_array -> Should handle multiple consecutive bits 0.003ms
+  ✓ bitmap64_get_bit_array -> Should handle multiple non-consecutive bits 0.001ms
+  ✓ bitmap64_get_bit_array -> Should handle large bit positions 0.004ms
+  ✓ bitmap64_get_bit_array -> Should properly null-terminate the result string 0.003ms
+  ✓ bitmap64_get_bit_array -> Should handle bitmap with maximum value only 0.003ms
+  ✓ bitmap64_get_bit_array -> Should correctly set size parameter 0.002ms
+  ✓ bitmap64_from_bit_array -> Should create empty bitmap from empty array 0.001ms
+  ✓ bitmap64_from_bit_array -> Should create bitmap with single bit set 0.002ms
+  ✓ bitmap64_from_bit_array -> Should create bitmap with single bit unset 0.001ms
+  ✓ bitmap64_from_bit_array -> Should correctly set multiple bits 0.002ms
+  ✓ bitmap64_from_bit_array -> Should handle all bits set 0.003ms
+  ✓ bitmap64_from_bit_array -> Should handle all bits unset 0.002ms
+  ✓ bitmap64_from_bit_array -> Should handle large arrays 0.196ms
+  ✓ bitmap64_from_bit_array -> Should ignore non-'1' characters 0.003ms
+  ✓ bitmap64_from_bit_array -> Should handle size parameter correctly when larger than array 0.002ms
+  ✓ bitmap64_from_bit_array -> Should handle very large indices 0.607ms
+  ✓ bitmap64_from_int_array -> Should create a bitmap from an int array and get the array from the bitmap 0.012ms
+  ✓ bitmap64_from_int_array -> Should serialize 0.008ms
+  ✓ bitmap64_get_nth_element -> Should get n-th element of a bitmap for n=1..cardinality 0.007ms
+  ✓ bitmap64_get_nth_element -> Should get n-th non existent element of a bitmap for n=1..cardinality 2.685ms
+  ✓ bitmap64_clearbits -> Should return false when bitmap is NULL 0.002ms
+  ✓ bitmap64_clearbits -> Should return true when bitmap is valid and offsets is NULL 0.001ms
+  ✓ bitmap64_clearbits -> Should return true when n_offsets is 0 0.001ms
+  ✓ bitmap64_clearbits -> Should clear single bit from bitmap 0.002ms
+  ✓ bitmap64_clearbits -> Should clear multiple bits from bitmap 0.003ms
+  ✓ bitmap64_clearbits -> Should handle large offset values 0.002ms
+  ✓ bitmap64_clearbits_count -> Should return 0 when bitmap is NULL 0.001ms
+  ✓ bitmap64_clearbits_count -> Should return 0 when offsets is NULL 0.001ms
+  ✓ bitmap64_clearbits_count -> Should return 0 when n_offsets is 0 0.001ms
+  ✓ bitmap64_clearbits_count -> Should return 0 when bitmap is empty 0.001ms
+  ✓ bitmap64_clearbits_count -> Should return correct count when all offsets exist in bitmap 0.002ms
+  ✓ bitmap64_clearbits_count -> Should return correct count when some offsets exist in bitmap 0.005ms
+  ✓ bitmap64_clearbits_count -> Should return 0 when no offsets exist in bitmap 0.002ms
+  ✓ bitmap64_clearbits_count -> Should handle duplicate offsets correctly 0.002ms
+  ✓ bitmap64_clearbits_count -> Should handle large offsets 0.002ms
+  ✓ bitmap64_intersect -> Should return true when bitmaps intersect in NONE mode 0.002ms
+  ✓ bitmap64_intersect -> Should return false when bitmaps don't intersect in NONE mode 0.001ms
+  ✓ bitmap64_intersect -> Should return false when one bitmap is empty in NONE mode 0.001ms
+  ✓ bitmap64_intersect -> Should return true when b2 is subset of b1 in ALL mode 0.001ms
+  ✓ bitmap64_intersect -> Should return false when b2 is not subset of b1 in ALL mode 0.001ms
+  ✓ bitmap64_intersect -> Should return true when b2 equals b1 in ALL mode 0.003ms
+  ✓ bitmap64_intersect -> Should return true when b2 is empty in ALL mode 0.001ms
+  ✓ bitmap64_intersect -> Should return true when b2 is strict subset of b1 in ALL_STRICT mode 0.001ms
+  ✓ bitmap64_intersect -> Should return false when b2 equals b1 in ALL_STRICT mode 0.001ms
+  ✓ bitmap64_intersect -> Should return false when b2 is not subset of b1 in ALL_STRICT mode 0.001ms
+  ✓ bitmap64_intersect -> Should return true when b2 is empty in ALL_STRICT mode 0.001ms
+  ✓ bitmap64_intersect -> Should return true when when b2 equals b1 in EQ mode 0.002ms
+  ✓ bitmap64_intersect -> Should return false when when b2 are not equals b1 in EQ mode 0.014ms
+  ✓ bitmap64_intersect -> Should return false for invalid mode 0.001ms
+  ✓ bitmap64_intersect -> Should handle NULL pointers gracefully 0.002ms
+  ✓ bitmap64_intersect -> Should work with large bitmaps 0.142ms
+  ✓ bitmap64_jaccard -> Should return 0 when first bitmap is NULL 0.002ms
+  ✓ bitmap64_jaccard -> Should return 0 when second bitmap is NULL 0.001ms
+  ✓ bitmap64_jaccard -> Should return 0 when both bitmaps are NULL 0.001ms
+  ✓ bitmap64_jaccard -> Should return 1 when comparing same bitmap instance 0.002ms
+  ✓ bitmap64_jaccard -> Should return -1 when both bitmaps are empty 0.001ms
+  ✓ bitmap64_jaccard -> Should return 0 when bitmaps have no intersection 0.001ms
+  ✓ bitmap64_jaccard -> Should return 1 when bitmaps are identical but different instances 0.001ms
+  ✓ bitmap64_jaccard -> Should calculate correct Jaccard index for partial overlap 0.002ms
+  ✓ bitmap64_jaccard -> Should handle one empty bitmap 0.001ms
+  ✓ bitmap64_jaccard -> Should handle large bitmaps with complex overlap 0.018ms
+  ✓ bitmap_get_nth_element -> Should get n-th element of a bitmap for n=1..cardinality 0.003ms
+  ✓ bitmap_get_nth_element -> Should get n-th non existent element of a bitmap for n=1..cardinality 1.488ms
+  ✓ bitmap_not -> Should perform a NOT using two different methods 0.002ms
+  ✓ bitmap_xor -> Should perform a XOR between three bitmaps 0.003ms
+  ✓ bitmap_xor -> Should clear destination bitmap when passed zero bitmaps even if dest was not empty initially 0.002ms
+  ✓ bitmap_and -> Should perform an AND between three bitmaps 0.001ms
+  ✓ bitmap_and -> Should clear destination bitmap when passed zero bitmaps even if dest was not empty initially 0.002ms
+  ✓ bitmap_and -> Should handle result bitmap appearing in input array (regression test for memcpy-param-overlap) 0.002ms
+  ✓ bitmap_or -> Should perform an OR between three bitmaps 0.002ms
+  ✓ bitmap_or -> Should clear destination bitmap when passed zero bitmaps even if dest was not empty initially 0.001ms
+  ✓ bitmap_or -> Should handle result bitmap appearing in input array (regression test for memcpy-param-overlap) 0.002ms
+  ✓ bitmap_andor -> Should handle empty array (n = 0) 0.001ms
+  ✓ bitmap_andor -> Should clear destination bitmap when passed zero bitmaps even if dest was not empty initially 0.002ms
+  ✓ bitmap_andor -> Should handle single bitmap (n = 1) 0.004ms
+  ✓ bitmap_andor -> Should perform AND-OR operation with two bitmaps 0.001ms
+  ✓ bitmap_andor -> Should perform AND-OR operation with three bitmaps 0.002ms
+  ✓ bitmap_andor -> Should handle disjoint bitmaps 0.002ms
+  ✓ bitmap_andor -> Should handle empty bitmaps in array 0.001ms
+  ✓ bitmap_andor -> Should handle when first bitmap is empty 0.001ms
+  ✓ bitmap_andor -> Should handle large number of bitmaps 0.005ms
+  ✓ bitmap_andor -> Should not modify input bitmaps 0.003ms
+  ✓ bitmap_andor -> Should handle result bitmap appearing in input array (regression test for memcpy-param-overlap) 0.002ms
+  ✓ bitmap_andnot -> Should clear bitmap when n is 0 0.002ms
+  ✓ bitmap_andnot -> Should copy bitmap when n is 1 0.002ms
+  ✓ bitmap_andnot -> Should compute A AND NOT B when n is 2 0.002ms
+  ✓ bitmap_andnot -> Should compute A AND NOT (B OR C OR D) when n > 2 0.002ms
+  ✓ bitmap_andnot -> Should handle empty bitmaps 0.001ms
+  ✓ bitmap_andnot -> Should handle result being empty 0.002ms
+  ✓ bitmap_andnot -> Should handle result bitmap with existing data 0.001ms
+  ✓ bitmap_andnot -> Should handle large number of bitmaps 0.006ms
+  ✓ bitmap64_andnot -> Should clear bitmap when n is 0 0.002ms
+  ✓ bitmap64_andnot -> Should copy bitmap when n is 1 0.001ms
+  ✓ bitmap64_andnot -> Should compute A AND NOT B when n is 2 0.002ms
+  ✓ bitmap64_andnot -> Should compute A AND NOT (B OR C OR D) when n > 2 0.003ms
+  ✓ bitmap64_andnot -> Should handle empty bitmaps 0.016ms
+  ✓ bitmap64_andnot -> Should handle result being empty 0.002ms
+  ✓ bitmap64_andnot -> Should handle result bitmap with existing data 0.001ms
+  ✓ bitmap64_andnot -> Should handle large number of bitmaps 0.008ms
+  ✓ bitmap64_andor -> Should handle empty array (n = 0) 0.001ms
+  ✓ bitmap64_andor -> Should clear destination bitmap when passed zero bitmaps even if dest was not empty initially 0.001ms
+  ✓ bitmap64_andor -> Should handle single bitmap (n = 1) 0.001ms
+  ✓ bitmap64_andor -> Should perform AND-OR operation with two bitmaps 0.002ms
+  ✓ bitmap64_andor -> Should perform AND-OR operation with three bitmaps 0.003ms
+  ✓ bitmap64_andor -> Should handle disjoint bitmaps 0.002ms
+  ✓ bitmap64_andor -> Should handle empty bitmaps in array 0.002ms
+  ✓ bitmap64_andor -> Should handle when first bitmap is empty 0.002ms
+  ✓ bitmap64_andor -> Should handle large number of bitmaps 0.006ms
+  ✓ bitmap64_andor -> Should not modify input bitmaps 0.003ms
+  ✓ bitmap64_one -> Should handle empty bitmap array 0.001ms
+  ✓ bitmap64_one -> Should clear destination bitmap when passed zero bitmaps even if dest was not empty initially 0.001ms
+  ✓ bitmap64_one -> Should handle single bitmap 0.001ms
+  ✓ bitmap64_one -> Should handle two non-overlapping bitmaps 0.003ms
+  ✓ bitmap64_one -> Should handle two overlapping bitmaps 0.002ms
+  ✓ bitmap64_one -> Should handle three bitmaps - Redis example 0.004ms
+  ✓ bitmap64_one -> Should handle all bitmaps have same bits 0.004ms
+  ✓ bitmap64_one -> Should handle one empty bitmap among others 0.003ms
+  ✓ bitmap64_one -> Should handle large bit values 0.004ms
+  ✓ bitmap64_one -> Should handle many bitmaps with complex overlaps 0.006ms
+  ✓ bitmap64_one -> Should not modify input bitmaps 0.003ms
+  ✓ bitmap_one -> Should handle empty bitmap array 0.001ms
+  ✓ bitmap_one -> Should clear destination bitmap when passed zero bitmaps even if dest was not empty initially 0.001ms
+  ✓ bitmap_one -> Should handle single bitmap 0.001ms
+  ✓ bitmap_one -> Should handle two non-overlapping bitmaps 0.003ms
+  ✓ bitmap_one -> Should handle two overlapping bitmaps 0.002ms
+  ✓ bitmap_one -> Should handle three bitmaps - Redis example 0.003ms
+  ✓ bitmap_one -> Should handle all bitmaps have same bits 0.003ms
+  ✓ bitmap_one -> Should handle one empty bitmap among others 0.003ms
+  ✓ bitmap_one -> Should handle large bit values 0.002ms
+  ✓ bitmap_one -> Should handle many bitmaps with complex overlaps 0.004ms
+  ✓ bitmap_one -> Should not modify input bitmaps 0.002ms
+  ✓ bitmap_ornot -> Should clear bitmap when n is 0 0.001ms
+  ✓ bitmap_ornot -> Should clear bitmap when n is 1 0.001ms
+  ✓ bitmap_ornot -> Should compute (B AND NOT A) when n is 2 0.002ms
+  ✓ bitmap_ornot -> Should compute ((B OR C OR D) AND NOT A) when n > 2 0.002ms
+  ✓ bitmap_ornot -> Should handle empty bitmaps 0.001ms
+  ✓ bitmap_ornot -> Should handle large values 0.001ms
+  ✓ bitmap_ornot -> Should overwrite existing result bitmap content 0.001ms
+  ✓ bitmap64_ornot -> Should clear bitmap when n is 0 0.001ms
+  ✓ bitmap64_ornot -> Should clear bitmap when n is 1 0.001ms
+  ✓ bitmap64_ornot -> Should compute (B AND NOT A) when n is 2 0.002ms
+  ✓ bitmap64_ornot -> Should compute ((B OR C OR D) AND NOT A) when n > 2 0.003ms
+  ✓ bitmap64_ornot -> Should handle empty bitmaps 0.001ms
+  ✓ bitmap64_ornot -> Should handle large values 0.001ms
+  ✓ bitmap64_ornot -> Should overwrite existing result bitmap content 0.002ms
+  ✓ bitmap_range_int_array -> Basic range extraction from bitmap 0.002ms
+  ✓ bitmap_range_int_array -> Range extraction with offset 0.001ms
+  ✓ bitmap_range_int_array -> Range extraction from sparse bitmap starting at zero 0.001ms
+  ✓ bitmap_range_int_array -> Large 32-bit value handling 0.001ms
+  ✓ bitmap_range_int_array -> Early termination when requesting more than available 0.002ms
+  ✓ bitmap_range_int_array -> Empty bitmap handling 0.002ms
+  ✓ bitmap_range_int_array -> Offset beyond available elements 0.001ms
+  ✓ bitmap_range_int_array -> Zero elements requested 0.001ms
+  ✓ bitmap_range_int_array -> Single element bitmap 0.002ms
+  ✓ bitmap_range_int_array -> Duplicate sequence test 0.001ms
+  ✓ bitmap_clearbits -> Should return false when bitmap is NULL 0.001ms
+  ✓ bitmap_clearbits -> Should return true when bitmap is valid and offsets is NULL 0.001ms
+  ✓ bitmap_clearbits -> Should return true when n_offsets is 0 0.001ms
+  ✓ bitmap_clearbits -> Should clear single bit from bitmap 0.001ms
+  ✓ bitmap_clearbits -> Should clear multiple bits from bitmap 0.002ms
+  ✓ bitmap_clearbits -> Should handle large offset values 0.001ms
+  ✓ bitmap_clearbits_count -> Should return 0 when bitmap is NULL 0.001ms
+  ✓ bitmap_clearbits_count -> Should return 0 when offsets is NULL 0.001ms
+  ✓ bitmap_clearbits_count -> Should return 0 when n_offsets is 0 0.000ms
+  ✓ bitmap_clearbits_count -> Should return 0 when bitmap is empty 0.001ms
+  ✓ bitmap_clearbits_count -> Should return correct count when all offsets exist in bitmap 0.002ms
+  ✓ bitmap_clearbits_count -> Should return correct count when some offsets exist in bitmap 0.002ms
+  ✓ bitmap_clearbits_count -> Should return 0 when no offsets exist in bitmap 0.002ms
+  ✓ bitmap_clearbits_count -> Should handle duplicate offsets correctly 0.002ms
+  ✓ bitmap_clearbits_count -> Should handle large offsets 0.001ms
+  ✓ bitmap_intersect -> Should return true when bitmaps intersect in NONE mode 0.001ms
+  ✓ bitmap_intersect -> Should return false when bitmaps don't intersect in NONE mode 0.001ms
+  ✓ bitmap_intersect -> Should return false when one bitmap is empty in NONE mode 0.001ms
+  ✓ bitmap_intersect -> Should return true when b2 is subset of b1 in ALL mode 0.002ms
+  ✓ bitmap_intersect -> Should return false when b2 is not subset of b1 in ALL mode 0.001ms
+  ✓ bitmap_intersect -> Should return true when b2 equals b1 in ALL mode 0.001ms
+  ✓ bitmap_intersect -> Should return true when b2 is empty in ALL mode 0.000ms
+  ✓ bitmap_intersect -> Should return true when b2 is strict subset of b1 in ALL_STRICT mode 0.001ms
+  ✓ bitmap_intersect -> Should return false when b2 equals b1 in ALL_STRICT mode 0.001ms
+  ✓ bitmap_intersect -> Should return false when b2 is not subset of b1 in ALL_STRICT mode 0.001ms
+  ✓ bitmap_intersect -> Should return true when b2 is empty in ALL_STRICT mode 0.000ms
+  ✓ bitmap_intersect -> Should return true when when b2 equals b1 in EQ mode 0.001ms
+  ✓ bitmap_intersect -> Should return false when when b2 are not equals b1 in EQ mode 0.001ms
+  ✓ bitmap_intersect -> Should return false for invalid mode 0.001ms
+  ✓ bitmap_intersect -> Should handle NULL pointers gracefully 0.000ms
+  ✓ bitmap_intersect -> Should work with large bitmaps 0.050ms
+  ✓ bitmap_jaccard -> Should return 0 when first bitmap is NULL 0.001ms
+  ✓ bitmap_jaccard -> Should return 0 when second bitmap is NULL 0.001ms
+  ✓ bitmap_jaccard -> Should return 0 when both bitmaps are NULL 0.000ms
+  ✓ bitmap_jaccard -> Should return 1 when comparing same bitmap instance 0.001ms
+  ✓ bitmap_jaccard -> Should return -1 when both bitmaps are empty 0.002ms
+  ✓ bitmap_jaccard -> Should return 0 when bitmaps have no intersection 0.002ms
+  ✓ bitmap_jaccard -> Should return 1 when bitmaps are identical but different instances 0.001ms
+  ✓ bitmap_jaccard -> Should calculate correct Jaccard index for partial overlap 0.001ms
+  ✓ bitmap_jaccard -> Should handle one empty bitmap 0.001ms
+  ✓ bitmap_jaccard -> Should handle large bitmaps with complex overlap 0.014ms
+  ✓ bitop key discovery -> Should report destination and source keys for variadic operations 0.000ms
+  ✓ bitop key discovery -> Should report only destination and source key for NOT operations 0.000ms
+  ✓ bitop key discovery -> Should reject unsupported operations and invalid arity 0.001ms
+  ✓ bitmap RDB bounds validation -> Should accept a complete native array serialization 0.001ms
+  ✓ bitmap RDB bounds validation -> Should reject truncated cardinalities without overflowing size_t 0.000ms
+  ✓ bitmap RDB bounds validation -> Should reject missing array headers and delegate other formats 0.000ms
+
+-----------------------------
+
+   Tests 264 passed (264)
+Duration 6.395ms

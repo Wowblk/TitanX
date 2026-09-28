@@ -12,7 +12,11 @@ public final class CounterKeys {
 
     // 分片键：bm:{metric}:{etype}:{eid}:{chunk}
     public static String bitmapKey(String metric, String entityType, String entityId, long chunk) {
-        return String.format("bm:%s:%s:%s:%d", metric, entityType, entityId, chunk); // 位图事实层（分片）
+        return bitmapKey("bm", metric, entityType, entityId, chunk); // 位图事实层（分片）
+    }
+
+    public static String bitmapKey(String prefix, String metric, String entityType, String entityId, long chunk) {
+        return String.format("%s:%s:%s:%s:%d", prefix, metric, entityType, entityId, chunk);
     }
 
     // 聚合增量持久化桶（Hash）：agg:{schema}:{etype}:{eid}

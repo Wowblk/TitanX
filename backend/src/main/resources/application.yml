@@ -88,6 +88,8 @@ canal:
   intervalMs: ${CANAL_INTERVAL_MS:1000}
 
 counter:
+  bitmap:
+    storage: ${COUNTER_BITMAP_STORAGE:native}
   rebuild:
     enabled: ${COUNTER_REBUILD_ENABLED:false}
     lock:

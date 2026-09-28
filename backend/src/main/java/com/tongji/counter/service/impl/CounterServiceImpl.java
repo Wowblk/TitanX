@@ -2,14 +2,13 @@ package com.tongji.counter.service.impl;
 
 import com.tongji.counter.schema.CounterKeys;
 import com.tongji.counter.schema.CounterSchema;
-import com.tongji.counter.schema.BitmapShard;
+import com.tongji.counter.storage.BitmapStore;
 import com.tongji.counter.service.CounterService;
 import com.tongji.counter.event.CounterEvent;
 import com.tongji.counter.event.CounterEventProducer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.context.ApplicationEventPublisher;
 import org.redisson.api.RedissonClient;
@@ -37,7 +36,7 @@ import java.util.concurrent.TimeUnit;
 public class CounterServiceImpl implements CounterService {
 
     private final StringRedisTemplate redis;
-    private final DefaultRedisScript<Long> toggleScript;
+    private final BitmapStore bitmapStore;
     private final CounterEventProducer eventProducer;
     private final ApplicationEventPublisher eventPublisher;
     private final RedissonClient redisson;
@@ -52,15 +51,12 @@ public class CounterServiceImpl implements CounterService {
     @Value("${counter.rebuild.backoff.max-ms:30000}")
     private long backoffMaxMs;
 
-    public CounterServiceImpl(StringRedisTemplate redis, CounterEventProducer eventProducer, ApplicationEventPublisher eventPublisher, RedissonClient redisson) {
+    public CounterServiceImpl(StringRedisTemplate redis, CounterEventProducer eventProducer, ApplicationEventPublisher eventPublisher, RedissonClient redisson, BitmapStore bitmapStore) {
         this.redis = redis;
         this.eventProducer = eventProducer;
         this.eventPublisher = eventPublisher;
         this.redisson = redisson;
-        this.toggleScript = new DefaultRedisScript<>();
-        this.toggleScript.setResultType(Long.class);
-        // 位图状态原子切换，仅在状态变化时返回 1
-        this.toggleScript.setScriptText(TOGGLE_LUA);
+        this.bitmapStore = bitmapStore;
     }
 
     /**
@@ -111,15 +107,7 @@ public class CounterServiceImpl implements CounterService {
      * @param add 是否置位（true=添加，false=移除）
      */
     private boolean toggle(String etype, String eid, long uid, String metric, int idx, boolean add) {
-        // 固定分片定位：按用户ID映射到 chunk 与分片内 bit 偏移，避免单键膨胀与热点
-        long chunk = BitmapShard.chunkOf(uid);
-        // 分片内位偏移
-        long bit = BitmapShard.bitOf(uid);
-        String bmKey = CounterKeys.bitmapKey(metric, etype, eid, chunk);
-        List<String> keys = List.of(bmKey);
-        List<String> args = List.of(String.valueOf(bit), add ? "add" : "remove");
-        Long changed = redis.execute(toggleScript, keys, args.toArray());
-        boolean ok = changed == 1L;
+        boolean ok = bitmapStore.set(metric, etype, eid, uid, add);
         if (ok) {
             int delta = add ? 1 : -1;
             // 产出计数事件（异步聚合），分区按实体维度保证同实体事件顺序
@@ -285,9 +273,7 @@ public class CounterServiceImpl implements CounterService {
      */
     @Override
     public boolean isLiked(String entityType, String entityId, long userId) {
-        long chunk = BitmapShard.chunkOf(userId);
-        long bit = BitmapShard.bitOf(userId);
-        return getBit(CounterKeys.bitmapKey("like", entityType, entityId, chunk), bit);
+        return bitmapStore.contains("like", entityType, entityId, userId);
     }
 
     /**
@@ -295,21 +281,7 @@ public class CounterServiceImpl implements CounterService {
      */
     @Override
     public boolean isFaved(String entityType, String entityId, long userId) {
-        long chunk = BitmapShard.chunkOf(userId);
-        long bit = BitmapShard.bitOf(userId);
-        return getBit(CounterKeys.bitmapKey("fav", entityType, entityId, chunk), bit);
-    }
-
-    /**
-     * 读取位图某偏移位（GETBIT）。
-     * @param key 位图分片键
-     * @param offset 分片内位偏移
-     * @return 位是否为 1
-     */
-    private boolean getBit(String key, long offset) {
-        Boolean bit = redis.execute((RedisCallback<Boolean>) connection ->
-                connection.stringCommands().getBit(key.getBytes(StandardCharsets.UTF_8), offset));
-        return Boolean.TRUE.equals(bit);
+        return bitmapStore.contains("fav", entityType, entityId, userId);
     }
 
     /**
@@ -412,48 +384,8 @@ public class CounterServiceImpl implements CounterService {
         buf[off + 3] = (byte) (n & 0xFF);
     }
 
-    /**
-     * 基于位图分片进行管道化 BITCOUNT 汇总，用于按事实重建计数。
-     * 说明：当前使用 KEYS 枚举分片（生产建议维护索引集合），结果按分片 BITCOUNT 求和。
-     */
+    /** Rebuild using the active bitmap format; SCAN avoids blocking key enumeration. */
     private long bitCountShardsPipelined(String metric, String etype, String eid) {
-        String pattern = String.format("bm:%s:%s:%s:*", metric, etype, eid);
-        // 生产环境建议以索引集合替代 KEYS
-        Set<String> keys = redis.keys(pattern); 
-        if (keys.isEmpty()) return 0L;
-
-        // 管道批量 BITCOUNT 汇总
-        List<Object> res = redis.executePipelined((RedisCallback<Object>) connection -> {
-            for (String k : keys) {
-                connection.stringCommands().bitCount(k.getBytes(StandardCharsets.UTF_8));
-            }
-            return null;
-        });
-        long sum = 0L;
-
-        for (Object o : res) {
-            if (o instanceof Number n) {
-                sum += n.longValue();
-            }
-        }
-        return sum;
+        return bitmapStore.count(metric, etype, eid);
     }
-
-    // Redis 内嵌 Lua（Redis 5/6 的 Lua 5.1），位图原子切换（分片内偏移）
-    private static final String TOGGLE_LUA = """
-            local bmKey = KEYS[1]
-            local offset = tonumber(ARGV[1])
-            local op = ARGV[2] -- 'add' or 'remove'
-            local prev = redis.call('GETBIT', bmKey, offset)
-            if op == 'add' then
-              if prev == 1 then return 0 end
-              redis.call('SETBIT', bmKey, offset, 1)
-              return 1
-            elseif op == 'remove' then
-              if prev == 0 then return 0 end
-              redis.call('SETBIT', bmKey, offset, 0)
-              return 1
-            end
-            return -1
-            """;
 }
