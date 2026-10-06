@@ -73,11 +73,34 @@ class CircuitBreaker:
     def get_state(self) -> CircuitState:
         return self._state
 
+    def can_attempt_call(self) -> bool:
+        """Return an advisory readiness snapshot without claiming a probe.
+
+        Routers must let a cooled-down open circuit reach ``call()`` or its
+        recovery probe can never run. Only ``_acquire_slot`` changes state
+        and reserves the probe under the lock; selecting a backend does not
+        guarantee execution, and competing callers must be checked again.
+        Like ``get_state``, this synchronous read assumes one event loop.
+        """
+        if self._state == "open":
+            return self._should_attempt_reset()
+        if self._state == "half-open":
+            return not self._half_open_probe_in_flight
+        return True
+
     async def call(self, fn: Callable[[], Awaitable[T]]) -> T:
         is_probe = await self._acquire_slot()
 
         try:
             result = await fn()
+        except asyncio.CancelledError:
+            # Host cancellation is not a backend health result. Release the
+            # probe without counting success/failure so a later routed call
+            # can retry recovery instead of leaving half-open stuck forever.
+            async with self._lock:
+                if is_probe:
+                    self._half_open_probe_in_flight = False
+            raise
         except Exception:
             async with self._lock:
                 self._record_failure(was_probe=is_probe)
