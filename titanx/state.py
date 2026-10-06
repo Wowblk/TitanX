@@ -23,6 +23,7 @@ def create_config(
     available_tools: list[ToolDefinition] | None = None,
     max_iterations: int = 10,
     auto_approve_tools: bool = False,
+    wrap_tool_output: bool = False,
 ) -> AgentConfig:
     return AgentConfig(
         thread_id=_new_id(),
@@ -33,6 +34,7 @@ def create_config(
         available_tools=tuple(available_tools or []),
         max_iterations=max_iterations,
         auto_approve_tools=auto_approve_tools,
+        wrap_tool_output=wrap_tool_output,
     )
 
 

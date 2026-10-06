@@ -32,6 +32,8 @@ class PendingApproval:
     tool_call_id: str
     parameters: dict[str, Any]
     requires_always: bool
+    # Host operation identity; model-provided call IDs only correlate messages.
+    execution_id: str | None = None
 
 
 @dataclass
@@ -39,6 +41,10 @@ class SystemMessage:
     role: Literal["system"]
     content: str
     id: str = field(default_factory=lambda: str(uuid4()))
+    # None allows recognition of legacy summaries by their reserved prefix.
+    # Explicit False always preserves a host-authored system instruction.
+    is_summary: bool | None = None
+    source_message_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -64,9 +70,40 @@ class ToolMessage:
     content: str
     id: str = field(default_factory=lambda: str(uuid4()))
     is_error: bool = False
+    artifact_id: str | None = None
 
 
 Message = Union[SystemMessage, UserMessage, AssistantMessage, ToolMessage]
+
+
+@dataclass(frozen=True)
+class TaskState:
+    """Host-owned task contract; summaries cannot grant or change permissions."""
+    objective: str
+    constraints: tuple[str, ...] = ()
+    acceptance_criteria: tuple[str, ...] = ()
+    id: str = field(default_factory=lambda: str(uuid4()))
+    revision: int = 1
+    source_message_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.objective, str) or not self.objective.strip():
+            raise ValueError("task objective must be nonempty text")
+        if not isinstance(self.id, str) or not self.id:
+            raise ValueError("task id must be nonempty text")
+        if type(self.revision) is not int or self.revision < 1:
+            raise ValueError("task revision must be a positive integer")
+        for name in ("constraints", "acceptance_criteria", "source_message_ids"):
+            values = getattr(self, name)
+            if isinstance(values, (str, bytes)):
+                raise ValueError(f"{name} must contain nonempty strings")
+            try:
+                values = tuple(values)
+            except TypeError:
+                raise ValueError(f"{name} must contain nonempty strings") from None
+            if any(not isinstance(v, str) or not v.strip() for v in values):
+                raise ValueError(f"{name} must contain nonempty strings")
+            object.__setattr__(self, name, values)
 
 
 @dataclass(frozen=True)
@@ -88,6 +125,7 @@ class AgentConfig:
     # compatibility with existing tests and custom LLM adapters that may
     # parse tool result content directly.
     wrap_tool_output: bool = False
+    max_output_tokens: int | None = None
 
 
 @dataclass
@@ -107,22 +145,20 @@ class AgentState:
     # batch across multiple invocations of _run_loop.
     pending_tool_calls: list[ToolCall] = field(default_factory=list)
     pending_tool_call_index: int = 0
-    # Tool-call IDs that the host has explicitly approved during this
-    # session. Consulted by the policy decision to override
-    # ``needs_approval`` for a specific call without globally relaxing
-    # ``auto_approve_tools``.
+    # Compatibility/observation only. Execution authorization lives in the
+    # runtime's private ExecutionGuard; editing this set grants no authority.
     approved_tool_call_ids: set[str] = field(default_factory=set)
     last_response_type: LastResponseType = "none"
     last_text_response: str = ""
     # Explicit user-driven compaction request. The runtime triggers a compaction
-    # pre-flight check whenever this is True OR when ``last_input_tokens``
-    # exceeds ``CompactionOptions.token_budget``. Set this from a host hook
+    # pre-flight check whenever this is True OR when the current input estimate
+    # reaches ``CompactionOptions.token_budget``. Set this from a host hook
     # (e.g. on /compact slash command) to force a flush regardless of size.
     needs_compaction: bool = False
     # Most recent LLM turn's prompt size, as reported by the provider's usage
-    # accounting. This is the canonical proxy for *current context size* and
-    # is what the compaction trigger compares against ``token_budget``.
-    # Crucially this is NOT a sum across turns — provider-reported
+    # accounting, retained as historical usage, not a preflight estimate.
+    # It cannot include new user input or tool output. This is NOT a sum across
+    # turns — provider-reported
     # ``input_tokens`` for turn N already includes the full prior history, so
     # accumulating across turns produces a quadratically inflated number.
     last_input_tokens: int = 0
@@ -130,6 +166,7 @@ class AgentState:
     # tracking / billing. NEVER use these for compaction triggering.
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    task: TaskState | None = None
 
 
 @dataclass
@@ -249,12 +286,24 @@ class CompactionTriggeredEvent:
     summary: str
     ptl_attempts: int
     type: Literal["compaction_triggered"] = "compaction_triggered"
+    input_tokens_before: int | None = None
+    input_tokens_after: int | None = None
+    target_tokens: int | None = None
+    duration_ms: float = 0.0
+    summary_input_tokens: int = 0
+    summary_output_tokens: int = 0
+    source_message_ids: tuple[str, ...] = ()
+    omitted_message_ids: tuple[str, ...] = ()
 
 
 @dataclass
 class CompactionFailedEvent:
     consecutive_failures: int
     type: Literal["compaction_failed"] = "compaction_failed"
+    reason: str | None = None
+    duration_ms: float = 0.0
+    summary_input_tokens: int = 0
+    summary_output_tokens: int = 0
 
 
 @dataclass
@@ -271,6 +320,24 @@ class CompactionExhaustedEvent:
     type: Literal["compaction_exhausted"] = "compaction_exhausted"
 
 
+@dataclass
+class CompactionBlockedEvent:
+    """The next model call was withheld; transcript and usage are preserved."""
+    reason: str
+    estimated_input_tokens: int | None
+    token_budget: int
+    type: Literal["compaction_blocked"] = "compaction_blocked"
+
+
+@dataclass
+class ContextOffloadedEvent:
+    message_id: str
+    artifact_id: str
+    original_chars: int
+    retained_chars: int
+    type: Literal["context_offloaded"] = "context_offloaded"
+
+
 RuntimeEvent = Union[
     LoopStartEvent,
     IterationStartEvent,
@@ -282,6 +349,8 @@ RuntimeEvent = Union[
     CompactionTriggeredEvent,
     CompactionFailedEvent,
     CompactionExhaustedEvent,
+    CompactionBlockedEvent,
+    ContextOffloadedEvent,
 ]
 
 # ── Protocol interfaces ───────────────────────────────────────────────────────
@@ -344,6 +413,14 @@ class SafetyLayerLike:
 
 
 class LlmAdapter:
+    def count_input_tokens(self, config: AgentConfig, messages: list[Message]) -> int | None:
+        """Optional synchronous count of the adapter's actual outgoing format.
+
+        Return None when unsupported. Implementations must not mutate inputs.
+        ``max_output_tokens`` is a request cap that adapters should forward.
+        """
+        return None
+
     async def respond(self, config: AgentConfig, state: AgentState) -> LlmTurnResult:
         raise NotImplementedError
 
@@ -361,4 +438,12 @@ OnEventCallback = Callable[[RuntimeEvent, AgentConfig, AgentState], Awaitable[No
 
 @dataclass
 class RuntimeHooks:
+    """Observability callbacks for a runtime invocation.
+
+    Constructor-supplied hooks remain the runtime default. Hosts that reuse a
+    runtime across requests should pass hooks to ``run_prompt`` (or bind them
+    with ``AgentRuntime.scoped_hooks``) so each task gets its own callback
+    scope instead of mutating a shared runtime-level callback.
+    """
+
     on_event: OnEventCallback | None = None
