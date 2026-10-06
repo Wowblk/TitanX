@@ -311,7 +311,6 @@ class CompactionTriggeredEvent:
 @dataclass
 class CompactionFailedEvent:
     consecutive_failures: int
-    reason: str = "auto"
     failure_reason: str = ""
     last_input_tokens: int = 0
     estimated_tokens: int = 0
