@@ -285,6 +285,18 @@ class LoopEndEvent:
 class CompactionTriggeredEvent:
     summary: str
     ptl_attempts: int
+    reason: str = "auto"
+    phase: str = "summary"
+    trigger_reason: str = ""
+    pre_compact_tokens: int = 0
+    post_compact_tokens: int = 0
+    projected_tokens: int = 0
+    budget: int = 0
+    messages_compacted: int = 0
+    messages_kept: int = 0
+    summary_tokens: int = 0
+    strategy_name: str = ""
+    duration_ms: float = 0.0
     type: Literal["compaction_triggered"] = "compaction_triggered"
     input_tokens_before: int | None = None
     input_tokens_after: int | None = None
@@ -299,6 +311,11 @@ class CompactionTriggeredEvent:
 @dataclass
 class CompactionFailedEvent:
     consecutive_failures: int
+    reason: str = "auto"
+    failure_reason: str = ""
+    last_input_tokens: int = 0
+    estimated_tokens: int = 0
+    budget: int = 0
     type: Literal["compaction_failed"] = "compaction_failed"
     reason: str | None = None
     duration_ms: float = 0.0

@@ -5,9 +5,12 @@ import argparse
 import asyncio
 from contextlib import asynccontextmanager
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Sequence
+import urllib.error
+import urllib.request
 from uuid import uuid4
 
 from .context import CompactionOptions, ContextOptions, SQLiteContextStore
@@ -15,7 +18,7 @@ from .factory import CreateSandboxedRuntimeOptions, create_sandboxed_runtime
 from .runtime import AgentRuntime
 from .safety import SafetyLayer
 from .types import (
-    LlmAdapter, LlmTurnResult, RuntimeHooks, ToolCall, ToolDefinition,
+    LlmAdapter, LlmTurnResult, LlmUsage, RuntimeHooks, ToolCall, ToolDefinition,
     ToolExecutionResult, ToolMessage, ToolRuntime,
 )
 
@@ -39,13 +42,142 @@ class EchoLlm(LlmAdapter):
         return LlmTurnResult(type="text", text=f"Echo: {last.content}" if last else "Hello!")
 
 
+class OpenAIChatLlm(LlmAdapter):
+    """Minimal OpenAI-compatible chat adapter (OpenAI, Kimi/Moonshot, ...).
+
+    Uses the standard ``POST {base_url}/chat/completions`` contract over stdlib
+    ``urllib`` so the SDK keeps no third-party HTTP dependency. Only the
+    text-content path is exercised: tool messages are flattened into ``user``
+    turns because the demo does not implement provider-native tool calling.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str = "gpt-4o-mini",
+        base_url: str = "https://api.openai.com/v1",
+        temperature: float = 1.0,
+    ) -> None:
+        self._api_key = api_key
+        self._model = model
+        self._base_url = base_url.rstrip("/")
+        self._temperature = temperature
+
+    async def respond(self, config, state):
+        messages: list[dict[str, str]] = []
+        if config.system_prompt:
+            messages.append({"role": "system", "content": config.system_prompt})
+        else:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "You are TitanX, a helpful agent running inside a sandboxed "
+                    "runtime. Be concise and explain tool limitations clearly."
+                ),
+            })
+
+        for message in state.messages:
+            if message.role in ("system", "user", "assistant"):
+                content = message.content or ""
+                if content:
+                    messages.append({"role": message.role, "content": content})
+            elif message.role == "tool":
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[Tool result from {message.tool_name}; "
+                        f"error={message.is_error}]\n{message.content}"
+                    ),
+                })
+
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": self._temperature,
+        }
+        data = await asyncio.to_thread(self._post_json, payload)
+        choice = (data.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        usage = data.get("usage") or {}
+        return LlmTurnResult(
+            type="text",
+            text=msg.get("content") or "",
+            usage=LlmUsage(
+                input_tokens=int(usage.get("prompt_tokens") or 0),
+                output_tokens=int(usage.get("completion_tokens") or 0),
+            ),
+        )
+
+    def _post_json(self, payload: dict) -> dict:
+        req = urllib.request.Request(
+            f"{self._base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"OpenAI API error {exc.code}: {detail}") from exc
+
+
+def select_llm() -> LlmAdapter:
+    """Choose a provider adapter from the environment, else the offline EchoLlm.
+
+    ``TITANX_LLM_PROVIDER`` is ``openai`` (default) | ``kimi`` | ``echo``.
+    Credentials: ``OPENAI_API_KEY`` or ``KIMI_API_KEY``/``MOONSHOT_API_KEY``.
+    Optional: ``OPENAI_MODEL``/``OPENAI_BASE_URL``, ``KIMI_MODEL``/``KIMI_BASE_URL``,
+    ``LLM_TEMPERATURE``. With no credentials this falls back to ``EchoLlm`` so
+    the demo stays offline by default.
+    """
+    raw_provider = os.getenv("TITANX_LLM_PROVIDER")
+    provider = (raw_provider or "openai").lower()
+    temperature = float(os.getenv("LLM_TEMPERATURE", "1"))
+    if provider in ("kimi", "moonshot"):
+        api_key = os.getenv("KIMI_API_KEY") or os.getenv("MOONSHOT_API_KEY")
+        if not api_key:
+            if raw_provider:
+                print("[titanx] KIMI_API_KEY is not set; using offline EchoLlm.")
+            return EchoLlm()
+        return OpenAIChatLlm(
+            api_key=api_key,
+            model=os.getenv("KIMI_MODEL", "kimi-k2.6"),
+            base_url=os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1"),
+            temperature=temperature,
+        )
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if provider == "echo" or not api_key:
+        if raw_provider and provider != "echo":
+            print(
+                "[titanx] OPENAI_API_KEY is not set; using offline EchoLlm. "
+                "Set TITANX_LLM_PROVIDER=kimi to use KIMI_API_KEY."
+            )
+        return EchoLlm()
+    return OpenAIChatLlm(
+        api_key=api_key,
+        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        temperature=temperature,
+    )
+
+
 class DemoApplication:
     """Own one store and provide identical context settings to every runtime."""
 
-    def __init__(self, data_dir: str | Path = ".titanx"):
+    def __init__(self, data_dir: str | Path = ".titanx", *, llm: LlmAdapter | None = None):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.store = SQLiteContextStore(self.data_dir / "context.sqlite")
+        # Provider adapter chosen by the entry point; ``None`` keeps the
+        # offline EchoLlm default so tests and the walkthrough stay hermetic.
+        self._llm = llm
 
     def create_runtime(
         self, hooks: RuntimeHooks | None = None, *,
@@ -53,7 +185,7 @@ class DemoApplication:
     ) -> AgentRuntime:
         # A host UUID is separate from the browser's untrusted session selector.
         shared = dict(
-            llm=llm or EchoLlm(), safety=SafetyLayer(), hooks=hooks,
+            llm=llm or self._llm or EchoLlm(), safety=SafetyLayer(), hooks=hooks,
             system_prompt="You are an offline TitanX demo assistant.",
             context_options=ContextOptions(self.store, session_id=str(uuid4())),
             compaction_options=CompactionOptions(
@@ -74,7 +206,9 @@ class DemoApplication:
         await self.store.close()
 
 
-def create_demo_gateway(data_dir: str | Path = ".titanx", *, port: int = 3000):
+def create_demo_gateway(
+    data_dir: str | Path = ".titanx", *, port: int = 3000, llm: LlmAdapter | None = None,
+):
     """Build an ASGI app without opening a database at import time."""
     from .gateway import GatewayOptions, create_gateway
 
@@ -89,7 +223,7 @@ def create_demo_gateway(data_dir: str | Path = ".titanx", *, port: int = 3000):
 
     @asynccontextmanager
     async def lifespan(app):
-        application = DemoApplication(data_dir)
+        application = DemoApplication(data_dir, llm=llm)
         app.state.titanx_application = application
         try:
             async with original_lifespan(app):
@@ -192,8 +326,8 @@ async def check_context(application: DemoApplication) -> None:
     print(f"原文仍可检索：{matches[0]['message_id']}")
 
 
-async def _run_terminal(args) -> int:
-    application = DemoApplication(args.data_dir)
+async def _run_terminal(args, llm: LlmAdapter | None = None) -> int:
+    application = DemoApplication(args.data_dir, llm=llm)
     try:
         if args.check_context:
             await check_context(application)
@@ -245,13 +379,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("TitanX · 离线模拟模型 · 上下文管理已开启")
     print(f"归档：{args.data_dir / 'context.sqlite'}")
     try:
+        # The offline walkthrough stays hermetic; interactive runs may opt into
+        # a real provider via TITANX_LLM_PROVIDER (defaults to EchoLlm).
+        llm = None if args.check_context else select_llm()
         if args.web:
             import uvicorn
-            app = create_demo_gateway(args.data_dir, port=args.port)
+            app = create_demo_gateway(args.data_dir, port=args.port, llm=llm)
             print(f"网页：http://127.0.0.1:{args.port}")
             uvicorn.run(app, host="127.0.0.1", port=args.port)
             return 0
-        return asyncio.run(_run_terminal(args))
+        return asyncio.run(_run_terminal(args, llm))
     except KeyboardInterrupt:
         return 0
     except (OSError, ValueError, RuntimeError) as exc:

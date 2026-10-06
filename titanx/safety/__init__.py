@@ -21,6 +21,15 @@ from .secret_scan import (
     SecretMatch,
     SecretScanAction,
 )
+from .package_scanner import (
+    PackageFinding,
+    PackageInstallCheck,
+    PackageScanResult,
+    ThreatPattern,
+    check_package_install,
+    format_scan_report,
+    scan_package,
+)
 from . import presets
 
 __all__ = [
@@ -44,8 +53,15 @@ __all__ = [
     "ScanResult",
     "SecretMatch",
     "SecretScanAction",
+    "PackageFinding",
+    "PackageInstallCheck",
+    "PackageScanResult",
+    "ThreatPattern",
     "audit_log_egress_hook",
+    "check_package_install",
     "caller_scope",
     "current_caller",
+    "format_scan_report",
     "presets",
+    "scan_package",
 ]

@@ -17,6 +17,7 @@ AuditEvent = Literal[
     "rollback",
     "tool_decision",
     "tool_invocation",
+    "compaction",
 ]
 
 AuditActor = Literal["host", "system", "agent"]
