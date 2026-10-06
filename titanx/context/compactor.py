@@ -1,102 +1,72 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from uuid import uuid4
+from copy import deepcopy
+from dataclasses import asdict, dataclass
+import asyncio
+from time import monotonic
+from typing import Literal
 
-from ..types import AgentState, AssistantMessage, Message, SystemMessage, ToolMessage
+from ..types import AgentConfig, AgentState, AssistantMessage, Message, SystemMessage, ToolMessage
+from .tokens import estimate_input_tokens
+from .tasks import model_messages
+from .store import ContextStore
+from .summary import StructuredSummary, SummaryValidationError
 from .types import CompactionOptions, CompactionResult, CompactionStrategy, CompactionTracking
 
-# Fraction of *eligible* (= non-system, non-pinned-tail) messages dropped per
-# PTL retry when the "drop largest middle message" heuristic doesn't free
-# enough budget. 0.2 keeps the trimmer gentle enough that on a 50-message
-# conversation we step ~10/8/6/5 messages, not a guillotine.
 PTL_TRIM_RATIO = 0.2
+SUMMARY_PREFIX = "[Conversation summary so far]\n"
+BlockedReason = Literal["context_budget_exceeded", "token_estimation_failed", "context_storage_failed"]
 
 
-def _system_messages(messages: list[Message]) -> list[Message]:
-    return [m for m in messages if m.role == "system"]
+def _is_summary(message: Message) -> bool:
+    if not isinstance(message, SystemMessage):
+        return False
+    return message.is_summary is True or (
+        message.is_summary is None and message.content.startswith(SUMMARY_PREFIX)
+    )
 
 
-def _split_pinned_tail(
-    messages: list[Message],
-    *,
-    min_recent: int,
-) -> tuple[list[Message], list[Message]]:
-    """Partition non-system messages into (eligible_to_trim, must_keep_tail).
+def _message_groups(messages: list[Message]) -> list[list[Message]]:
+    """Keep an assistant tool declaration and its consecutive results atomic."""
+    groups: list[list[Message]] = []
+    for message in messages:
+        if (
+            isinstance(message, ToolMessage) and groups
+            and isinstance(groups[-1][0], AssistantMessage)
+            and groups[-1][0].tool_calls
+        ):
+            groups[-1].append(message)
+        else:
+            groups.append([message])
+    return groups
 
-    The tail is the floor of "most recent N" messages PTL must never touch.
-    We also expand the tail upwards to cover any in-flight tool-call group:
-    if the K-th-from-end message is a ``ToolMessage``, walk back until we hit
-    its parent ``AssistantMessage`` (the one with ``tool_calls``). Splitting
-    a tool_calls→tool_result pair across the trim boundary would leave an
-    orphan tool_result that no LLM provider will accept (HTTP 400 on the
-    next turn). This is the same invariant the Q2 fix protects in the
-    approval flow.
-    """
-    body = [m for m in messages if m.role != "system"]
-    if len(body) <= min_recent:
-        return [], body
 
-    cut = len(body) - min_recent
-    while cut > 0 and isinstance(body[cut], ToolMessage):
+def _flatten(groups: list[list[Message]]) -> list[Message]:
+    return [message for group in groups for message in group]
+
+
+def _split_pinned_tail(messages: list[Message], *, min_recent: int) -> tuple[list[Message], list[Message]]:
+    groups = _message_groups([m for m in messages if m.role != "system"])
+    cut, retained = len(groups), 0
+    while cut > 0 and retained < min_recent:
         cut -= 1
-    if cut > 0 and isinstance(body[cut - 1], AssistantMessage):
-        ahead = body[cut - 1]
-        if ahead.tool_calls:
-            cut -= 1
-    return body[:cut], body[cut:]
+        retained += len(groups[cut])
+    return _flatten(groups[:cut]), _flatten(groups[cut:])
 
 
-def _drop_largest(eligible: list[Message]) -> list[Message] | None:
-    """Drop the single largest eligible message by content length.
-
-    Real-world context blowouts almost always come from one bloated tool
-    output — a 60KB JSON dump, an entire scraped HTML page, etc. Removing
-    that one message is *far* more effective than the historical PTL
-    behaviour of chopping the conversation's head, which threw away the
-    user's original goal and system framing while leaving the bloated
-    middle untouched.
-    """
-    if not eligible:
-        return None
-    biggest_idx = max(
-        range(len(eligible)),
-        key=lambda i: len(getattr(eligible[i], "content", "") or ""),
-    )
-    return [m for i, m in enumerate(eligible) if i != biggest_idx]
+def _drop_largest(eligible: list[Message]) -> list[Message]:
+    groups = _message_groups(eligible)
+    if not groups:
+        return []
+    # Include call arguments, not only content. Never orphan a tool result.
+    biggest = max(range(len(groups)), key=lambda i: estimate_input_tokens(None, groups[i]))
+    return _flatten([group for i, group in enumerate(groups) if i != biggest])
 
 
-def _trim_oldest(eligible: list[Message]) -> list[Message] | None:
-    """Fallback when no single message dominates: chop the oldest 20%.
-
-    Only invoked after ``_drop_largest`` has already pulled the obvious
-    culprit. Operates strictly on the eligible (non-pinned) span so user
-    framing in messages 0..1 still survives via _split_pinned_tail's tail
-    slot if min_recent_messages is large enough — this is a knob the host
-    can tune.
-    """
-    trim_count = max(1, int(len(eligible) * PTL_TRIM_RATIO))
-    if len(eligible) <= trim_count:
-        return None
-    return eligible[trim_count:]
-
-
-def _summary_message(summary: str) -> SystemMessage:
-    """Inject the post-compaction summary as a SystemMessage.
-
-    Earlier code wrapped the summary in a UserMessage, which made the model
-    treat the body as a fresh user instruction (with all the hijack risk
-    that implies). The summary is *background context* the agent should
-    remember; SystemMessage is the role that semantically conveys "this is
-    framing, not a directive". The framing prefix is also explicit so a
-    well-trained model and a human reading the log can distinguish a
-    compaction artefact from the real system prompt.
-    """
-    return SystemMessage(
-        role="system",
-        content=f"[Conversation summary so far]\n{summary}",
-        id=str(uuid4()),
-    )
+def _trim_oldest(eligible: list[Message]) -> list[Message]:
+    groups = _message_groups(eligible)
+    trim_count = max(1, int(len(groups) * PTL_TRIM_RATIO))
+    return _flatten(groups[trim_count:])
 
 
 @dataclass
@@ -104,27 +74,21 @@ class CompactionOutcome:
     was_compacted: bool
     tracking: CompactionTracking
     result: CompactionResult | None = None
-    # Set when ``tracking.consecutive_failures`` has reached
-    # ``options.max_consecutive_failures``. Runtime treats this as a terminal
-    # condition and aborts the loop with an explicit event — see Q8 fix in
-    # ``runtime.py``.
     exhausted: bool = False
+    estimated_input_tokens: int | None = None
+    blocked_reason: BlockedReason | None = None
+    failure_reason: str | None = None
+    duration_ms: float = 0.0
+    summary_input_tokens: int = 0
+    summary_output_tokens: int = 0
 
 
-def _should_compact(state: AgentState, options: CompactionOptions) -> bool:
-    """Trigger gate.
-
-    Compaction fires when *either* the host has explicitly requested it
-    (``state.needs_compaction``) or the most recent LLM turn's prompt size
-    crossed the budget. ``last_input_tokens`` is the **canonical** signal
-    here — see ``AgentState.last_input_tokens`` for why we deliberately
-    stopped using ``total_input_tokens``: the latter accumulates across
-    turns and double-counts the prior history that's already inside each
-    turn's reported ``input_tokens``.
-    """
-    if state.needs_compaction:
-        return True
-    return state.last_input_tokens >= options.token_budget
+def _estimate(config: AgentConfig | None, messages: list[Message], options: CompactionOptions) -> int:
+    # Host callbacks receive a detached request view, like the summarizer.
+    count = options.token_estimator(deepcopy(config), deepcopy(messages))
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError("token_estimator must return a nonnegative integer")
+    return count
 
 
 async def auto_compact_if_needed(
@@ -132,99 +96,143 @@ async def auto_compact_if_needed(
     strategy: CompactionStrategy,
     options: CompactionOptions,
     tracking: CompactionTracking,
+    *,
+    config: AgentConfig | None = None,
+    store: ContextStore | None = None,
+    store_timeout_seconds: float = 10.0,
 ) -> CompactionOutcome:
+    """Commit one replacement summary only after the rebuilt input fits.
+
+    Summary failures and budget/estimation blocks leave the transcript intact.
+    PTL retries may discard eligible history, but retain prior summaries in
+    every attempt and keep assistant/tool groups whole. The pinned recent tail
+    and original system instructions never enter PTL trimming.
+    """
+    started = monotonic()
     if tracking.consecutive_failures >= options.max_consecutive_failures:
-        # Already in a permanently-degraded state. The runtime is expected
-        # to read ``exhausted`` and stop the loop; we never auto-recover
-        # because retrying a strategy that has failed N times in a row is
-        # almost always going to keep failing — the right move is to break
-        # the loop and let the host operator decide.
-        return CompactionOutcome(was_compacted=False, tracking=tracking, exhausted=True)
+        return CompactionOutcome(False, tracking, exhausted=True)
 
-    if not _should_compact(state, options):
-        return CompactionOutcome(was_compacted=False, tracking=tracking)
+    estimated: int | None = None
+    failure_reason: str | None = None
+    summary_input_tokens = 0
+    summary_output_tokens = 0
 
-    eligible, pinned_tail = _split_pinned_tail(
-        state.messages, min_recent=options.min_recent_messages,
-    )
+    def estimate(messages):
+        return _estimate(config, model_messages(state, messages), options)
 
-    if not eligible:
-        # Nothing the trimmer can legally remove — every message is either
-        # a system message or part of the pinned tail. Treat as failure so
-        # the consecutive-failure ceiling can eventually break us out.
+    def failure(reason: BlockedReason | None = None) -> CompactionOutcome:
+        detail = reason or failure_reason
+        if reason is None and estimated is not None and estimated >= options.input_budget:
+            reason = "context_budget_exceeded"
+        failures = CompactionTracking(tracking.consecutive_failures + 1)
         return CompactionOutcome(
-            was_compacted=False,
-            tracking=CompactionTracking(consecutive_failures=tracking.consecutive_failures + 1),
+            False, failures,
+            exhausted=failures.consecutive_failures >= options.max_consecutive_failures,
+            estimated_input_tokens=estimated, blocked_reason=reason,
+            failure_reason=detail or reason, duration_ms=(monotonic() - started) * 1000,
+            summary_input_tokens=summary_input_tokens, summary_output_tokens=summary_output_tokens,
         )
 
-    summary: str | None = None
-    ptl_attempts = 0
-    candidates = list(eligible)
+    try:
+        estimated = estimate(state.messages)
+    except Exception:
+        return failure("token_estimation_failed")
+    if not state.needs_compaction and estimated < options.input_budget:
+        return CompactionOutcome(False, tracking, estimated_input_tokens=estimated)
 
-    while summary is None:
+    systems = [m for m in state.messages if m.role == "system" and not _is_summary(m)]
+    summaries = [m for m in state.messages if _is_summary(m)]
+    eligible, pinned_tail = _split_pinned_tail(state.messages, min_recent=options.min_recent_messages)
+    if not eligible and not summaries:
+        failure_reason = "no_eligible_history"
+        return failure()
+
+    # If the immutable portion alone is too large, summarizing older history
+    # cannot help. Preserve the full transcript for the host to resolve.
+    try:
+        if estimate([*systems, *pinned_tail]) >= options.input_budget:
+            failure_reason = "pinned_context_too_large"
+            return failure()
+    except Exception:
+        return failure("token_estimation_failed")
+
+    candidates = eligible
+    for ptl_attempts in range(options.max_ptl_retries + 1):
         try:
-            produced = await strategy.summarize(candidates)
-        except Exception:
+            inputs = [*summaries, *candidates]
+            contextual = getattr(strategy, "summarize_context", None)
+            request = (contextual(deepcopy(inputs), task=deepcopy(state.task), target_tokens=options.target_tokens)
+                       if contextual else strategy.summarize(deepcopy(inputs)))
+            produced = await asyncio.wait_for(request, timeout=options.summary_timeout_seconds)
+            if isinstance(produced, StructuredSummary):
+                summary_input_tokens += produced.usage.input_tokens
+                summary_output_tokens += produced.usage.output_tokens
+                produced.validate(inputs, state.task)
+                produced = produced.render()
+            elif options.require_structured_summary:
+                raise ValueError("structured summary required")
+        except TimeoutError:
+            failure_reason = "summary_timeout"
             produced = None
-        if produced and len(produced) <= options.max_summary_chars:
-            summary = produced
+        except SummaryValidationError as exc:
+            summary_input_tokens += exc.usage.input_tokens
+            summary_output_tokens += exc.usage.output_tokens
+            failure_reason = "summary_failed_or_invalid"
+            produced = None
+        except Exception:
+            failure_reason = "summary_failed_or_invalid"
+            produced = None
+
+        if isinstance(produced, str) and produced.strip() and len(produced) <= options.max_summary_chars:
+            # Preserve the existing adapter-facing role, but mark SDK summaries
+            # explicitly so future passes merge them instead of pinning them.
+            rebuilt = [
+                *systems,
+                SystemMessage(role="system", content=f"{SUMMARY_PREFIX}{produced}", is_summary=True,
+                              source_message_ids=tuple(m.id for m in inputs)),
+                *pinned_tail,
+            ]
+            try:
+                rebuilt_estimate = estimate(rebuilt)
+            except Exception:
+                return failure("token_estimation_failed")
+            if rebuilt_estimate <= options.target_tokens:
+                included_ids = {m.id for m in inputs}
+                result = CompactionResult(
+                    summary=produced, messages_retained=len(rebuilt), ptl_attempts=ptl_attempts,
+                    source_message_ids=tuple(m.id for m in inputs), input_tokens_before=estimated,
+                    input_tokens_after=rebuilt_estimate, duration_ms=(monotonic() - started) * 1000,
+                    summary_input_tokens=summary_input_tokens, summary_output_tokens=summary_output_tokens,
+                    omitted_message_ids=tuple(m.id for m in eligible if m.id not in included_ids),
+                )
+                if store is not None:
+                    try:
+                        if config is None:
+                            raise ValueError("archival requires a configured session")
+                        summary_message = next(m for m in rebuilt if _is_summary(m))
+                        await asyncio.wait_for(store.commit_compaction(
+                            config.session_id, state.messages, rebuilt,
+                            {"id": summary_message.id, **asdict(result),
+                             "task_id": state.task.id if state.task else None,
+                             "task_revision": state.task.revision if state.task else None},
+                        ), timeout=store_timeout_seconds)
+                    except Exception:
+                        return failure("context_storage_failed")
+                state.messages = rebuilt
+                state.needs_compaction = False
+                # Usage fields remain the actual past provider counts.
+                return CompactionOutcome(
+                    True, CompactionTracking(),
+                    result=result,
+                    estimated_input_tokens=rebuilt_estimate,
+                )
+            failure_reason = "summary_target_not_reached"
+        elif produced is not None:
+            failure_reason = "summary_failed_or_invalid"
+
+        if ptl_attempts == options.max_ptl_retries or not candidates:
             break
-
-        # Either summarisation raised, or it returned a string so large that
-        # ingesting it would re-blow the budget we're trying to enforce.
-        # Both cases retry via PTL trimming.
-        if ptl_attempts >= options.max_ptl_retries:
-            return CompactionOutcome(
-                was_compacted=False,
-                tracking=CompactionTracking(
-                    consecutive_failures=tracking.consecutive_failures + 1,
-                ),
-            )
-
-        # First retry: drop the single largest message — usually the bloated
-        # tool output that triggered the budget breach. Subsequent retries
-        # fall back to the oldest-20% chop. This is the inverse of the
-        # historical behaviour, which cut the head and left the bomb in.
-        next_candidates = (
-            _drop_largest(candidates) if ptl_attempts == 0
-            else _trim_oldest(candidates)
-        )
-        if next_candidates is None or not next_candidates:
-            return CompactionOutcome(
-                was_compacted=False,
-                tracking=CompactionTracking(
-                    consecutive_failures=tracking.consecutive_failures + 1,
-                ),
-            )
-        candidates = next_candidates
-        ptl_attempts += 1
-
-    # Successful compaction: rebuild messages as
-    # [original system prompts] + [summary] + [pinned recent tail]. Pinning
-    # the tail preserves the in-flight reasoning the agent needs to make
-    # forward progress on the user's current task — historically this was
-    # nuked along with everything else, which often broke mid-tool-call
-    # message chains.
-    state.messages = [
-        *_system_messages(state.messages),
-        _summary_message(summary),
-        *pinned_tail,
-    ]
-
-    # Reset the trigger metric — the next LLM turn will repopulate it with
-    # the provider's authoritative count for the *new* (post-compaction)
-    # prompt. Crucially we do NOT touch ``total_input_tokens`` /
-    # ``total_output_tokens``: those are cumulative cost-tracking counters
-    # that must keep growing across the whole session.
-    state.last_input_tokens = 0
-    state.needs_compaction = False
-
-    return CompactionOutcome(
-        was_compacted=True,
-        tracking=CompactionTracking(consecutive_failures=0),
-        result=CompactionResult(
-            summary=summary,
-            messages_retained=len(state.messages),
-            ptl_attempts=ptl_attempts,
-        ),
-    )
+        candidates = _drop_largest(candidates) if ptl_attempts == 0 else _trim_oldest(candidates)
+        if not candidates and not summaries:
+            break
+    return failure()
