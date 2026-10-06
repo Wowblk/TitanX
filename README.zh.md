@@ -10,21 +10,38 @@ TitanX 是一个 Python Agent SDK，用于构建具备显式运行时语义、�
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-python demo.py
+python run.py
 ```
 
-## Gateway 示例
+`run.py` 是统一入口，默认进入终端连续对话，也可以选择以下模式：
 
 ```bash
-python run_gateway.py
+python run.py "你好"                   # 单次输入，回复后退出
+python run.py --web                   # 网页界面：http://127.0.0.1:3000
+python run.py --web --port 3001       # 使用其他端口
+python run.py --check-context         # 校验归档、回查和压缩
+python run.py --data-dir ./local-data # 指定本地数据目录
 ```
 
-默认服务地址是 `http://localhost:3000`。
+各模式共用 `titanx/application.py` 的运行时配置，**默认开启消息归档、大工具输出转存、
+内置结构化摘要压缩和原文回查**。数据目录默认是 `.titanx`，上下文归档保存在
+`.titanx/context.sqlite`。
+终端支持 `/compact`（在下一条输入调用模型前尝试压缩）和 `/exit`（退出）。终端及
+网页模式保留默认沙箱运行时接线；上下文校验使用进程内合成工具验证流程。
+
+当前内置的仍然是**离线模拟 LLM**，不会调用真实模型 API。这里的默认启用只作用于统一
+应用入口；直接使用 SDK 的 `AgentRuntime` 或 `create_sandboxed_runtime()` 时，仍由
+调用方传入上下文配置。归档持久化不代表重启后自动恢复正在进行的对话或工具执行。
+
+旧的 `demo.py`、`run_gateway.py` 和 `demo_context.py` 保留为兼容转发脚本，不再分别
+维护运行时配置。实现方式、会话边界和验证记录见[统一入口说明](docs/unified-entrypoint.md)。
 
 ## 目录结构
 
 | 路径 | 作用 |
 | --- | --- |
+| `run.py` | 终端、网页和上下文校验的统一入口 |
+| `titanx/application.py` | 应用运行时组装和默认上下文配置 |
 | `titanx/runtime.py` | Agent 主运行循环 |
 | `titanx/types.py` | 核心 dataclass 和 adapter 接口 |
 | `titanx/factory.py` | 默认运行时组装 |
