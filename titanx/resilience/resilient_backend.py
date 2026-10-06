@@ -76,9 +76,13 @@ class ResilientSandboxBackend(SandboxBackend):
         return self._backend.capabilities()
 
     async def is_available(self) -> bool:
-        if self._breaker.get_state() == "open":
+        if not self._breaker.can_attempt_call():
             return False
-        return await self._backend.is_available()
+        available = await self._backend.is_available()
+        # Health checks may yield while another call trips the breaker or
+        # takes its probe slot. This is still advisory: execute() atomically
+        # rechecks admission before entering the underlying backend.
+        return available and self._breaker.can_attempt_call()
 
     async def execute(self, request: SandboxExecutionRequest, session: SandboxSession | None = None) -> SandboxExecutionResult:
         return await self._breaker.call(

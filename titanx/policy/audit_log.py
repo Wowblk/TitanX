@@ -73,6 +73,7 @@ into a ``PolicyStore.set`` failure.
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import json
 import os
@@ -132,6 +133,48 @@ def _safe_default(obj: object) -> object:
 _STOP_SENTINEL: object = object()
 
 
+def _detached_entry(entry: AuditEntry) -> AuditEntry:
+    """Return an object graph that shares no mutable state with ``entry``.
+
+    ``AuditEntry.details`` is intentionally extensible and may contain a
+    host-defined object that refuses ``deepcopy``.  Preserve the standard
+    fields and degrade only such an exotic value through ``_safe_default``;
+    never fall back to retaining the caller's live reference.
+    """
+    try:
+        return copy.deepcopy(entry)
+    except Exception:
+        def clone(value: object) -> object:
+            try:
+                return copy.deepcopy(value)
+            except Exception:
+                if isinstance(value, dict):
+                    return {str(key): clone(item) for key, item in value.items()}
+                if isinstance(value, (list, tuple)):
+                    return [clone(item) for item in value]
+                if isinstance(value, (set, frozenset)):
+                    return [clone(item) for item in sorted(value, key=str)]
+                return _safe_default(value)
+
+        details = clone(entry.details)
+        if not isinstance(details, dict):
+            details = {"value": details}
+        return AuditEntry(
+            timestamp=entry.timestamp,
+            event=entry.event,
+            actor=entry.actor,
+            reason=entry.reason,
+            before=clone(entry.before),  # type: ignore[arg-type]
+            after=clone(entry.after),  # type: ignore[arg-type]
+            snapshot_id=entry.snapshot_id,
+            tool_name=entry.tool_name,
+            tool_call_id=entry.tool_call_id,
+            decision=entry.decision,
+            is_error=entry.is_error,
+            details=details,
+        )
+
+
 class AuditLog:
     def __init__(
         self,
@@ -174,10 +217,11 @@ class AuditLog:
     async def append(self, entry: AuditEntry) -> None:
         if self._closed:
             raise RuntimeError("AuditLog is closed")
+        canonical = _detached_entry(entry)
         # Update the in-memory ring synchronously so ``get_entries``
         # always reflects the post-call state. The disk write is decoupled
         # via the queue and can lag without affecting host visibility.
-        self._entries.append(entry)
+        self._entries.append(canonical)
 
         # Secondary sink fan-out. Runs before the queue enqueue so a
         # slow sink gets at most one entry's worth of backpressure
@@ -187,7 +231,10 @@ class AuditLog:
         # loops on every audit append.
         if self._secondary_sink is not None and not self._secondary_disabled:
             try:
-                result = self._secondary_sink(entry)
+                # A sink is an extension boundary and may mutate its input.
+                # Give it a private copy so it cannot rewrite the canonical
+                # in-memory record or the pending JSONL record.
+                result = self._secondary_sink(_detached_entry(canonical))
                 if inspect.isawaitable(result):
                     await result
             except Exception as exc:
@@ -201,7 +248,10 @@ class AuditLog:
             return
         await self._ensure_writer()
         assert self._queue is not None
-        await self._queue.put(entry)
+        # The writer is asynchronous.  Queue another detached copy so later
+        # mutation through either the caller or a secondary sink cannot race
+        # with JSON serialization and alter the durable record.
+        await self._queue.put(_detached_entry(canonical))
 
     def get_entries(self) -> list[AuditEntry]:
         """Return a snapshot of the in-memory ring buffer.
@@ -213,7 +263,7 @@ class AuditLog:
         on disk** (if a ``log_path`` was configured) — the disk file is
         the durable record.
         """
-        return list(self._entries)
+        return [_detached_entry(entry) for entry in self._entries]
 
     async def flush(self) -> None:
         """Force every queued entry to be written and fsynced to disk.

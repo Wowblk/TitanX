@@ -13,6 +13,7 @@ key invariants:
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 
@@ -123,3 +124,59 @@ class TestSecondarySinkFanout:
         )
         assert len(captured) == 1
         assert captured[0].event == "policy_change"
+
+
+class TestAuditRecordImmutability:
+    async def test_append_and_get_entries_never_leak_mutable_records(self) -> None:
+        audit = AuditLog()
+        submitted = AuditEntry(
+            timestamp="2026-08-27T00:00:00+00:00",
+            event="tool_decision",
+            actor="host",
+            reason="original",
+            details={"nested": {"value": "original"}},
+        )
+
+        await audit.append(submitted)
+        submitted.reason = "tampered caller"
+        submitted.details["nested"]["value"] = "tampered caller"
+
+        [leaked] = audit.get_entries()
+        leaked.reason = "tampered reader"
+        leaked.details["nested"]["value"] = "tampered reader"
+
+        [fresh] = audit.get_entries()
+        assert fresh.reason == "original"
+        assert fresh.details == {"nested": {"value": "original"}}
+
+    async def test_sink_mutation_cannot_rewrite_ring_or_jsonl(self, tmp_path) -> None:
+        log_path = tmp_path / "audit.jsonl"
+
+        def mutating_sink(entry: AuditEntry) -> None:
+            entry.reason = "tampered sink"
+            entry.details["nested"]["value"] = "tampered sink"
+
+        audit = AuditLog(
+            str(log_path),
+            fsync_policy="every",
+            secondary_sink=mutating_sink,
+        )
+        submitted = AuditEntry(
+            timestamp="2026-08-27T00:00:00+00:00",
+            event="tool_decision",
+            actor="host",
+            reason="original",
+            details={"nested": {"value": "original"}},
+        )
+
+        await audit.append(submitted)
+        submitted.reason = "tampered caller"
+        submitted.details["nested"]["value"] = "tampered caller"
+        await audit.aclose()
+
+        [memory_entry] = audit.get_entries()
+        disk_entry = json.loads(log_path.read_text())
+        assert memory_entry.reason == "original"
+        assert memory_entry.details == {"nested": {"value": "original"}}
+        assert disk_entry["reason"] == "original"
+        assert disk_entry["details"] == {"nested": {"value": "original"}}

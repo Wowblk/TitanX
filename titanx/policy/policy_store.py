@@ -33,14 +33,32 @@ class PolicyStore(ReadonlyPolicyView):
         # mount /proc.
         validate_policy(initial)
         self._current = copy.deepcopy(initial)
+        self._epoch = 0
         self._snapshots: list[PolicySnapshot] = []
         self._audit_log = audit_log or AuditLog()
 
+    @property
+    def epoch(self) -> int:
+        """Monotonic in-process revision, including rollback installations."""
+        return self._epoch
+
     def get_policy(self) -> AgentPolicy:
-        return self._current
+        # ``AgentPolicy`` deliberately stays a mutable dataclass because hosts
+        # commonly build a candidate policy incrementally before passing it to
+        # ``set``.  That makes returning the live object here a privilege-
+        # escalation bug: a caller could mutate ``auto_approve_tools`` or append
+        # a path after validation, bypassing snapshots and the audit log.
+        #
+        # Return a detached view so every live mutation still has to cross the
+        # validated + audited ``set`` / ``rollback`` boundary.
+        return copy.deepcopy(self._current)
 
     def get_snapshots(self) -> list[PolicySnapshot]:
-        return list(self._snapshots)
+        # A shallow list copy is insufficient because ``PolicySnapshot`` and
+        # its nested ``AgentPolicy`` are mutable.  Leaking either reference
+        # would let a caller poison a future rollback target without producing
+        # an audit event.
+        return copy.deepcopy(self._snapshots)
 
     def get_audit_log(self) -> AuditLog:
         return self._audit_log
@@ -117,6 +135,7 @@ class PolicyStore(ReadonlyPolicyView):
         before = copy.deepcopy(self._current)
         snapshot = self._save_snapshot(reason)
         self._current = copy.deepcopy(policy)
+        self._epoch += 1
         from .types import AuditEntry
         await self._audit_log.append(AuditEntry(
             timestamp=_now(),
@@ -127,7 +146,11 @@ class PolicyStore(ReadonlyPolicyView):
             reason=reason,
             snapshot_id=snapshot.id,
         ))
-        return snapshot
+        # ``snapshot`` is also retained internally as a rollback target.  Do
+        # not leak that mutable object to the caller: mutating the return value
+        # would otherwise poison a future rollback just as surely as mutating
+        # an item returned by ``get_snapshots()``.
+        return copy.deepcopy(snapshot)
 
     async def rollback(self, snapshot_id: str, actor: str = "host") -> None:
         """Restore a previously-stored snapshot.
@@ -156,6 +179,7 @@ class PolicyStore(ReadonlyPolicyView):
 
         before = copy.deepcopy(self._current)
         self._current = copy.deepcopy(snapshot.policy)
+        self._epoch += 1
         from .types import AuditEntry
         await self._audit_log.append(AuditEntry(
             timestamp=_now(),

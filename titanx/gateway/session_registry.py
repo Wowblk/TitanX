@@ -41,6 +41,10 @@ from ..types import RuntimeHooks
 CreateRuntime = Callable[[str, RuntimeHooks], "AgentRuntime | Awaitable[AgentRuntime]"]
 
 
+class SessionCapacityError(RuntimeError):
+    """Raised when every bounded-registry slot is actively in use."""
+
+
 class SessionRegistry:
     def __init__(self, *, max_sessions: int, idle_ttl_seconds: float) -> None:
         if max_sessions <= 0:
@@ -88,7 +92,10 @@ class SessionRegistry:
             # ones we already could've reaped.
             self._sweep_idle_locked()
             if len(self._sessions) >= self._max:
-                self._evict_lru_locked()
+                if not self._evict_lru_locked():
+                    raise SessionCapacityError(
+                        "session capacity reached and all sessions are active"
+                    )
 
             runtime_or_coro = create(session_id, hooks)
             if inspect.isawaitable(runtime_or_coro):
@@ -114,21 +121,43 @@ class SessionRegistry:
     # ── internal ────────────────────────────────────────────────────────
 
     def _is_idle_expired(self, entry: SessionEntry) -> bool:
+        if self._is_protected(entry):
+            return False
         if self._ttl <= 0:
             return False
         return (time.monotonic() - entry.last_used) > self._ttl
 
+    @staticmethod
+    def _is_protected(entry: SessionEntry) -> bool:
+        """Return whether eviction could strand an active safety decision."""
+        state = getattr(entry.runtime, "state", None)
+        return (
+            entry.lock.locked()
+            or getattr(state, "pending_approval", None) is not None
+            or entry.approval_resolution is not None
+            or entry.approve_event.is_set()
+        )
+
     def _sweep_idle_locked(self) -> None:
         if self._ttl <= 0:
             return
-        cutoff = time.monotonic() - self._ttl
         # Materialise the iteration so we can mutate the dict.
-        stale = [k for k, v in self._sessions.items() if v.last_used < cutoff]
+        stale = [
+            key
+            for key, entry in self._sessions.items()
+            if self._is_idle_expired(entry)
+        ]
         for k in stale:
             self._sessions.pop(k, None)
 
-    def _evict_lru_locked(self) -> None:
-        if not self._sessions:
-            return
-        victim = min(self._sessions.items(), key=lambda kv: kv[1].last_used)[0]
+    def _evict_lru_locked(self) -> bool:
+        candidates = [
+            item
+            for item in self._sessions.items()
+            if not self._is_protected(item[1])
+        ]
+        if not candidates:
+            return False
+        victim = min(candidates, key=lambda item: item[1].last_used)[0]
         self._sessions.pop(victim, None)
+        return True

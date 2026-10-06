@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Literal
 
 from ..runtime import AgentRuntime
 from ..types import RuntimeHooks
@@ -50,9 +50,20 @@ class GatewayOptions:
 
 
 @dataclass
+class ApprovalResolution:
+    """One host decision, bound to the exact pending tool call."""
+
+    decision: Literal["approve", "reject"]
+    tool_call_id: str
+    reason: str | None = None
+    execution_id: str | None = None
+
+
+@dataclass
 class SessionEntry:
     runtime: AgentRuntime
-    approve_event: object  # asyncio.Event — typed as object to avoid import cycle
+    approve_event: asyncio.Event
+    approval_resolution: ApprovalResolution | None = None
     # Per-session serialisation lock so concurrent ``run_prompt`` calls
     # against the same session never interleave their state mutations.
     # Without this, two parallel POSTs would fight over
@@ -63,3 +74,51 @@ class SessionEntry:
 
     def touch(self) -> None:
         self.last_used = time.monotonic()
+
+    def resolve_approval(
+        self,
+        *,
+        decision: Literal["approve", "reject"],
+        tool_call_id: str,
+        reason: str | None = None,
+        execution_id: str | None = None,
+    ) -> str | None:
+        """Atomically resolve the current approval, or return an error.
+
+        ``tool_call_id`` is mandatory: accepting a generic/late approval while
+        another tool is pending can accidentally authorise the wrong side
+        effect. Since this method contains no awaits, the check-and-set is
+        atomic within the gateway event loop; the first valid decision wins.
+        """
+        pending = self.runtime.state.pending_approval
+        if pending is None:
+            return "no pending approval"
+        if pending.tool_call_id != tool_call_id:
+            return "toolCallId does not match the pending approval"
+        if pending.execution_id is not None and execution_id != pending.execution_id:
+            return "executionId does not match the pending approval"
+        if self.approval_resolution is not None or self.approve_event.is_set():
+            return "approval already resolved"
+
+        self.approval_resolution = ApprovalResolution(
+            decision=decision,
+            tool_call_id=tool_call_id,
+            reason=reason,
+            execution_id=execution_id,
+        )
+        self.approve_event.set()
+        return None
+
+    def consume_approval_resolution(
+        self,
+        expected_tool_call_id: str,
+        expected_execution_id: str | None = None,
+    ) -> ApprovalResolution | None:
+        """Consume a decision only when it belongs to the current call."""
+        resolution = self.approval_resolution
+        if (resolution is None or resolution.tool_call_id != expected_tool_call_id
+                or resolution.execution_id != expected_execution_id):
+            return None
+        self.approval_resolution = None
+        self.approve_event.clear()
+        return resolution

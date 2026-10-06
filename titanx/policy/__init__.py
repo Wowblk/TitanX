@@ -12,10 +12,12 @@ from .types import (
 from .audit_log import AuditLog, SecondarySink
 from .audit_sinks import storage_secondary_sink
 from .policy_store import PolicyStore
+from .execution import ApprovalGrant, ExecutionAuthorizationError, ExecutionGuard, ExecutionGuardOptions, ToolIntent
 from .break_glass import BreakGlassController
 from .validation import PolicyValidationError, validate_policy, validate_write_path
 
 __all__ = [
+    "ApprovalGrant", "ExecutionAuthorizationError", "ExecutionGuard", "ExecutionGuardOptions", "ToolIntent",
     "AgentPolicy",
     "AuditActor",
     "AuditEntry",

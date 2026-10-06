@@ -11,10 +11,10 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 
 # Run the stub demo (wires EchoLlm through the full runtime)
-python demo.py
+python run.py "Hello, TitanX!"
 
 # Start the FastAPI gateway on http://localhost:3000
-python run_gateway.py
+python run.py --web
 
 # Tests (pytest + pytest-asyncio, asyncio_mode=auto)
 pytest                       # run everything
@@ -45,7 +45,7 @@ AgentRuntime.run_prompt(input)
 ### Key Design Decisions
 
 - **Config vs. state split**: `AgentConfig` is `@dataclass(frozen=True)`; `AgentState` is mutable. Never merge them.
-- **LlmAdapter is user-supplied**: implement `async def respond(config, state) -> LlmTurnResult` to plug in any LLM. See `EchoLlm` in `demo.py` for the minimal shape.
+- **LlmAdapter is user-supplied**: implement `async def respond(config, state) -> LlmTurnResult` to plug in any LLM. See the offline `EchoLlm` in `titanx/application.py` for the minimal shape.
 - **Three-tier sandboxing**: WASM (low-risk, registered commands), Docker (medium, filesystem), E2B (high, remote/browser).
 - **Compaction**: optional but critical for long sessions. `CompactionStrategy.summarize()` is called when the token budget is exceeded; on failure, PTL strips the oldest 20% of messages and retries.
 - **Circuit breaker**: 3-state machine (closed → open → half-open) with rolling-window failure tracking, configurable per backend.
@@ -79,4 +79,4 @@ AgentRuntime.run_prompt(input)
 - **Custom storage**: implement `StorageBackend` from `titanx/storage/types.py`.
 - **Custom embedding**: implement `EmbeddingProvider` from `titanx/retrieval/types.py`.
 
-Use `create_sandboxed_runtime()` from `titanx/factory.py` to wire components together. For a minimal working example, see `demo.py`; for the gateway wiring, see `run_gateway.py`.
+Use `create_sandboxed_runtime()` from `titanx/factory.py` to wire components together. `run.py` is the unified application entry; `titanx/application.py` shares context-enabled runtime wiring across terminal and gateway modes. `python run.py --check-context` runs the offline context walkthrough. The old scripts are compatibility wrappers; SDK constructors still leave context management opt-in.

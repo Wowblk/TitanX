@@ -11,6 +11,35 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Added
 
+- **Operation-bound tool authorization** — `ToolIntent`, private `ApprovalGrant`
+  records and `ExecutionGuard` bind approval to the run, batch, arguments,
+  registered contract, host identity and monotonic policy revision. Approval
+  expires (300 seconds by default), can be revoked before admission, and is
+  consumed once. Every dispatch validates JSON Schema and bounded JSON values,
+  then rechecks authorization after awaited audit/hooks. Overlapping runtime
+  runners are refused; same-task resume from the paused gateway hook remains
+  supported. See the [trigger and implementation report](docs/model-tool-loop-operation-authorization.md).
+- **Context archive and bounded recall** — optional session-scoped SQLite
+  transcripts, large inspected tool-output offloading, paged `context_read`
+  and literal `context_search`. Originals and summary provenance are committed
+  before replacing the active view. Host-owned versioned `TaskState`, structured
+  LLM summaries, adapter token counting, lower compaction targets, output/window
+  reserves, summary/storage timeouts and richer events support long sessions.
+  `retry_context()` recovers context failures without replaying completed tool
+  batches; a failed final archive retries storage only. Legacy strategies remain
+  supported. Includes an offline demo and [design/trigger report](docs/context-management.md).
+- **Deny-by-default MCP admission runtime** — transport-independent
+  `McpAdmissionRuntime` accepts official Python SDK object shapes without a
+  core `mcp` dependency, exposes only tools present in exact server and tool
+  allowlists as `mcp__{server_id}__{tool}`, and requires approval plus output
+  sanitization by default. Initial discovery caches a SHA-256 baseline of
+  the model-visible contract (`name`, `title`, `description`, `inputSchema`,
+  and `outputSchema`); optional administrator-supplied contract pins protect
+  first contact, while unpinned tools are labelled as process-local TOFU.
+  Execution re-lists by default and refuses tool-surface or contract drift.
+  Discovery time/tool count/contract size and call time/result size are
+  bounded, MCP annotations cannot relax approval, and result `_meta` is
+  excluded while text, structured content, and `isError` are preserved.
 - **SSRF private-destination block** — `EgressPolicy.block_private_addresses`
   (default `True`) refuses outbound URLs whose authority resolves to
   literal RFC1918 / loopback / link-local / CGNAT / multicast /
@@ -129,6 +158,13 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Changed
 
+- **Approval protocol** — gateway approve/reject requests must return the
+  `executionId` from the pending approval as well as `toolCallId`. The bundled UI
+  displays the operation and sends both fields. Direct SDK calls retain the
+  no-argument `approve_pending_tool()` API; async hosts should pass `execution_id`.
+  `AgentState.approved_tool_call_ids` is now observation-only. Tool contracts and
+  parameters must be bounded JSON, schemas are enforced, and runtime catalog
+  drift is refused. This adds the `jsonschema` dependency.
 - `SandboxBackend.create_session` and `ResilientSandboxBackend.create_session`
   accept new keyword-only arguments `allowed_read_paths` and
   `image_digest`. Existing custom backends keep working: the
@@ -141,6 +177,49 @@ always be flagged in the **Changed** / **Removed** sections.
   not set them itself.
 - `pyproject.toml` registers a `titanx` console script entry point
   (`titanx.cli:main`).
+
+### Fixed
+
+- **Compaction summary accumulation and stale budget checks** — previous SDK
+  summaries now merge into one replacement summary. Preflight sizes the current
+  system prompt, tools, messages, arguments and results using a configurable
+  estimator, then checks the rebuilt request before committing. Oversized or
+  uncountable inputs stop before the model call with `compaction_blocked`;
+  failed attempts preserve history and usage, and PTL keeps tool groups intact.
+  See [the reproduction and repair report](docs/context-compaction.md).
+- **SDK prompt admission during approval** — `run_prompt()` now rejects new
+  input before changing state whenever an approval or uncleared tool batch
+  remains. Approving or rejecting a tool still requires `resume()` before
+  starting a new prompt, preserving message order, approvals, and iteration
+  budgets. See [the issue and repair report](docs/runtime-prompt-admission.md).
+- **Routed circuit-breaker recovery** — cooled-down backends can re-enter
+  sandbox selection without reserving a recovery probe during availability
+  checks. Execution still admits only one half-open probe at a time;
+  cancelled probes release their slot without changing health counters.
+  Reproduction conditions, failure evidence, and validation are recorded in
+  [the recovery report](docs/circuit-breaker-routing-recovery.md).
+- **Runtime protocol and at-most-once execution** — tool-call batches are
+  detached from adapter, history, event, and dispatch objects; cancellation
+  closes every declared call exactly once; and the execution cursor commits as
+  soon as a tool returns. Validator, safety inspection, audit, or observer
+  failures therefore cannot replay an external side effect. Tool exceptions
+  and reported errors are recorded without persisting raw backend text, and
+  optional escaped trust-boundary wrappers make tool output explicit to the
+  model.
+- **Policy and audit mutation bypasses** — `PolicyStore` no longer exposes live
+  policies or internally stored snapshots through mutable return values, and
+  `AuditLog` detaches caller, reader, secondary-sink, and JSONL-queue objects so
+  append-only evidence cannot be rewritten through a shared reference.
+- **Fail-closed sandbox routing** — explicit isolation floors can no longer
+  weaken the floor derived from a tool's risk and capabilities. Browser/remote,
+  network/package/filesystem, and WASM workloads refuse backends that do not
+  satisfy their required isolation or advertised capabilities instead of
+  silently downgrading.
+- **Gateway approval and stream integrity** — each SSE/WebSocket run has
+  task-local event hooks; approve/reject decisions must match the exact pending
+  `toolCallId`; host rejection is audited and emitted as a terminal tool result;
+  and active or approval-blocked sessions cannot be evicted by TTL/LRU. A full
+  registry whose sessions are all active now rejects new sessions safely.
 
 ## [0.2.0] - 2026-04-25
 

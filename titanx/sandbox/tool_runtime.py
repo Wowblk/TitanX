@@ -13,6 +13,7 @@ from .session_manager import SandboxSessionManager
 from .types import (
     SandboxExecutionRequest,
     SandboxExecutionResult,
+    SandboxKind,
     SandboxRouterInput,
     SandboxToolPolicy,
 )
@@ -85,7 +86,11 @@ class SandboxedToolRuntime(ToolRuntime):
             if live_policy is not None
             else self._allowed_write_paths
         )
-        if effective_paths:
+        # ``None`` means "no whitelist configured" (direct SDK construction).
+        # An explicit ``[]`` is a *configured* empty whitelist and must fail
+        # closed — treating it as "unrestricted" is the difference between a
+        # read-only sandbox and an unguarded one.
+        if effective_paths is not None:
             denied = self._check_write_paths(req, effective_paths)
             if denied:
                 return ToolExecutionResult(output=denied, error="path_not_allowed")
@@ -95,7 +100,7 @@ class SandboxedToolRuntime(ToolRuntime):
         # mounts ``/`` read-only and bind-mounts these paths writable). The
         # PathGuard check above is *defence-in-depth*; this propagation is
         # what actually guarantees write isolation in production.
-        if effective_paths and req.allowed_write_paths is None:
+        if effective_paths is not None and req.allowed_write_paths is None:
             req.allowed_write_paths = list(effective_paths)
 
         # Propagate read-only mount targets and the image digest pin from
@@ -212,9 +217,45 @@ class SandboxedToolRuntime(ToolRuntime):
     def _policy_to_router_input(self, policy: SandboxToolPolicy | None) -> SandboxRouterInput:
         if not policy:
             return SandboxRouterInput()
+        # Safety classifications are enforcement defaults, not merely ranking
+        # hints.  A custom tool author who marks a workload high-risk or remote
+        # must not also remember a second, easy-to-forget flag to prevent a
+        # silent downgrade.  An explicit floor may strengthen this derived
+        # constraint, but can never weaken it (``high`` + ``wasm`` must still
+        # require E2B).
+        derived_floor: SandboxKind | None = None
+        if (
+            policy.requires_remote_isolation
+            or policy.needs_browser
+            or policy.risk_level == "high"
+        ):
+            derived_floor = "e2b"
+        elif (
+            policy.needs_filesystem
+            or policy.needs_network
+            or policy.needs_package_install
+            or policy.risk_level == "medium"
+        ):
+            derived_floor = "docker"
+
+        rank: dict[SandboxKind, int] = {"wasm": 1, "docker": 2, "e2b": 3}
+        explicit_floor = policy.min_isolation
+        if explicit_floor is not None and explicit_floor not in rank:
+            raise ValueError(f"Unknown sandbox isolation floor: {explicit_floor!r}")
+        if derived_floor is None:
+            min_isolation = explicit_floor
+        elif explicit_floor is None:
+            min_isolation = derived_floor
+        else:
+            min_isolation = (
+                explicit_floor
+                if rank[explicit_floor] >= rank[derived_floor]
+                else derived_floor
+            )
         return SandboxRouterInput(
             preferred_backend=policy.preferred_backend,
             risk_level=policy.risk_level,
+            min_isolation=min_isolation,
             requires_remote_isolation=policy.requires_remote_isolation,
             needs_filesystem=policy.needs_filesystem,
             needs_network=policy.needs_network,

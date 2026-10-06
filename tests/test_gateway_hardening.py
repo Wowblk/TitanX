@@ -11,9 +11,8 @@ import asyncio
 
 import pytest
 
-from titanx.gateway.routes.chat import _set_runtime_hooks
 from titanx.gateway.server import _check_api_key
-from titanx.gateway.session_registry import SessionRegistry
+from titanx.gateway.session_registry import SessionCapacityError, SessionRegistry
 from titanx.types import RuntimeHooks
 
 
@@ -32,16 +31,12 @@ class TestApiKeyComparison:
 
 
 class _FakeRuntime:
-    def __init__(self, sid: str, hooks: RuntimeHooks | None = None) -> None:
+    def __init__(self, sid: str) -> None:
         self.sid = sid
-        self.hooks = hooks or RuntimeHooks()
-
-    def set_hooks(self, hooks: RuntimeHooks) -> None:
-        self.hooks = hooks
 
 
 async def _create_runtime(sid: str, hooks: RuntimeHooks) -> _FakeRuntime:
-    return _FakeRuntime(sid, hooks)
+    return _FakeRuntime(sid)
 
 
 class TestSessionRegistryBounds:
@@ -100,22 +95,44 @@ class TestSessionRegistryBounds:
         a, b = await asyncio.gather(request(), request())
         assert a is b
 
+    async def test_active_session_is_never_ttl_or_lru_evicted(self) -> None:
+        registry = SessionRegistry(max_sessions=1, idle_ttl_seconds=0.01)
+        active = await registry.get_or_create(
+            "active", _create_runtime, RuntimeHooks()  # type: ignore[arg-type]
+        )
+        active.last_used = 0.0
+        await active.lock.acquire()
+        try:
+            assert registry.get("active") is active
+            with pytest.raises(SessionCapacityError, match="all sessions are active"):
+                await registry.get_or_create(
+                    "new", _create_runtime, RuntimeHooks()  # type: ignore[arg-type]
+                )
+            assert registry.get("active") is active
+        finally:
+            active.lock.release()
 
-class TestRuntimeHookRefresh:
-    async def test_reused_runtime_receives_new_request_hooks(self) -> None:
-        registry = SessionRegistry(max_sessions=10, idle_ttl_seconds=60.0)
-        first = RuntimeHooks(on_event=lambda *_: None)
-        second = RuntimeHooks(on_event=lambda *_: None)
+        replacement = await registry.get_or_create(
+            "new", _create_runtime, RuntimeHooks()  # type: ignore[arg-type]
+        )
+        assert replacement is not active
+        assert "active" not in registry
+        assert "new" in registry
 
-        entry = await registry.get_or_create("shared", _create_runtime, first)  # type: ignore[arg-type]
-        assert entry.runtime.hooks is first
+    async def test_pending_approval_is_protected_even_without_locked_run(self) -> None:
+        registry = SessionRegistry(max_sessions=1, idle_ttl_seconds=0.01)
+        active = await registry.get_or_create(
+            "approval", _create_runtime, RuntimeHooks()  # type: ignore[arg-type]
+        )
+        active.runtime.state = type(
+            "State",
+            (),
+            {"pending_approval": object()},
+        )()
+        active.last_used = 0.0
 
-        # A second request for the same session reuses the runtime, so
-        # the gateway must refresh hooks before run_prompt. Otherwise
-        # SSE events keep going to the first request's closed queue and
-        # the second response appears to hang.
-        again = await registry.get_or_create("shared", _create_runtime, second)  # type: ignore[arg-type]
-        assert again is entry
-        _set_runtime_hooks(again.runtime, second)
-
-        assert again.runtime.hooks is second
+        assert registry.get("approval") is active
+        with pytest.raises(SessionCapacityError):
+            await registry.get_or_create(
+                "new", _create_runtime, RuntimeHooks()  # type: ignore[arg-type]
+            )

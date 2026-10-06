@@ -78,6 +78,11 @@ class ManagedSandboxSession(SandboxSession):
 class SandboxToolPolicy:
     preferred_backend: SandboxKind | None = None
     risk_level: SandboxRiskLevel | None = None
+    # Hard isolation floor for this tool.  Unlike ``risk_level`` (a routing
+    # hint), this is an enforcement constraint: if no backend at or above the
+    # floor is available, execution must fail closed instead of silently
+    # degrading to a weaker sandbox.
+    min_isolation: SandboxKind | None = None
     requires_remote_isolation: bool = False
     needs_filesystem: bool = False
     needs_network: bool = False

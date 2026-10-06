@@ -10,21 +10,41 @@ This repository now tracks the Python implementation. The previous TypeScript im
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-python demo.py
+python run.py
 ```
 
-## Gateway Demo
+`run.py` is the shared entry point for terminal chat, the browser UI, and the
+offline context check:
 
 ```bash
-python run_gateway.py
+python run.py "Hello"                  # One prompt, then exit
+python run.py --web                    # Browser UI: http://127.0.0.1:3000
+python run.py --web --port 3001        # Choose a different port
+python run.py --check-context          # Check archival, recall, and compaction
+python run.py --data-dir ./local-data  # Choose where local data is stored
 ```
 
-The gateway starts on `http://localhost:3000`.
+Every mode uses the shared configuration in `titanx/application.py`. Archival,
+large-output offloading, built-in structured compaction, and bounded source
+recall are enabled by default in this application. The default data directory is
+`.titanx`, with archived context in `.titanx/context.sqlite`.
+In terminal chat, `/compact` requests compaction before the next prompt and
+`/exit` ends the session. Terminal and browser modes retain the default sandbox
+runtime wiring; the context check uses a synthetic in-process tool fixture.
+
+The bundled adapter is still an **offline mock LLM**; it does not call a model
+API. The SDK constructors keep their existing opt-in context configuration.
+Archived data does not restore a running conversation after process restart.
+The old `demo.py`, `run_gateway.py`, and `demo_context.py` scripts forward to
+the unified application for compatibility. See the
+[entry point design and boundaries](docs/unified-entrypoint.md).
 
 ## Project Layout
 
 | Path | Purpose |
 | --- | --- |
+| `run.py` | Shared terminal, browser, and context-check entry point |
+| `titanx/application.py` | Application runtime wiring and context defaults |
 | `titanx/runtime.py` | Main agent runtime loop |
 | `titanx/types.py` | Core dataclasses and adapter interfaces |
 | `titanx/factory.py` | Default runtime wiring |
@@ -36,10 +56,61 @@ The gateway starts on `http://localhost:3000`.
 | `titanx/storage/` | Storage backend interfaces and implementations |
 | `titanx/retrieval/` | Hybrid retrieval and MMR ranking |
 | `titanx/tools/` | Optional tool catalogs, including IronClaw-inspired WASM tools |
+| `titanx/mcp/` | Deny-by-default MCP discovery, contract pinning, drift detection, and execution |
 | `titanx/gateway/` | FastAPI gateway and UI serving |
 | `titanx/audit.py` | Programmatic security posture audit (CLI: `titanx audit`) |
 | `titanx/cli.py` | Command-line entry point for operator preflight |
 | [`SECURITY.md`](./SECURITY.md) | Trust model, in-scope defenses, out-of-scope assumptions |
+| [`docs/security-principles/`](docs/security-principles/README.md) | Adopted security principles, OWASP 2026 references, and implementation gaps |
+
+## Secure MCP Admission
+
+The MCP adapter is transport-independent and does not import the optional
+`mcp` package. Install the official Python SDK only when your host needs it:
+
+```bash
+pip install -e ".[mcp]"
+```
+
+Pass an already-connected official `ClientSession` (or any compatible object)
+behind an exact server **and** tool allowlist. The default policy exposes no
+tools:
+
+```python
+import os
+
+from titanx import AgentRuntime, McpAdmissionPolicy, McpAdmissionRuntime
+
+policy = McpAdmissionPolicy(
+    allowed_servers={"github"},
+    allowed_tools={"github": {"search_repositories"}},
+    # Optional high-assurance first-contact pin, obtained through a separate
+    # trusted review channel. Without it the process uses a TOFU baseline.
+    expected_contract_sha256={
+        "github": {
+            "search_repositories": os.environ["GITHUB_MCP_SEARCH_CONTRACT_SHA256"],
+        },
+    },
+    call_timeout_seconds=30,
+)
+mcp_tools = McpAdmissionRuntime({"github": connected_client_session}, policy)
+
+# Discovery is async; list_tools() is then a synchronous cached view suitable
+# for AgentRuntime. The admitted name is mcp__github__search_repositories.
+await mcp_tools.discover()
+agent = AgentRuntime(llm=llm, tools=mcp_tools, safety=safety)
+```
+
+Admitted tools require approval and output sanitization by default. Every
+execution re-lists the server and fails closed if tools are added/removed or if
+the baseline `name`, `title`, `description`, `inputSchema`, or `outputSchema`
+changes. Configure `expected_contract_sha256` to verify that full contract on
+the first connection as well. Without a pin, the baseline is explicitly
+process-local trust on first use (TOFU), so it detects later drift but cannot
+detect a server compromised before startup. MCP `annotations` never relax
+approval, result-level `_meta` is not forwarded to the model, and total
+discovery time, advertised tool count, contract size, call time, and result
+size all have fail-closed bounds configurable on `McpAdmissionPolicy`.
 
 ## Architecture
 
@@ -49,7 +120,7 @@ The gateway starts on `http://localhost:3000`.
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                            CLIENT / ENTRYPOINT                                ║
 ║                                                                               ║
-║   demo.py          run_gateway.py (FastAPI)          custom scripts           ║
+║   run.py          run.py --web (FastAPI)          custom scripts             ║
 ║      │                    │                                │                  ║
 ║      └────────────────────┴────────────┬───────────────────┘                  ║
 ╚═══════════════════════════════════════ │ ═════════════════════════════════════╝
@@ -316,6 +387,15 @@ classDiagram
 
 Trust escalates left-to-right; every boundary crossing is mediated by a guard component. Audit events are appended to JSONL at every policy decision and every tool invocation.
 
+Start with the [security principles](docs/security-principles/README.md) for the
+project baseline, OWASP 2026 sources, and adoption checklist.
+See the [Model-Tool Loop security design](docs/model-tool-loop-security-design.md)
+for current boundaries and remaining resource/recovery work. The first phase of
+[operation-bound authorization](docs/model-tool-loop-operation-authorization.md)
+is implemented: immutable intents, private expiring approvals, policy revisions,
+schema validation, and final admission checks. Gateway approval/rejection clients
+must return both `toolCallId` and the pending operation's `executionId`.
+
 ### 5. Production Hardening Hooks
 
 These are the knobs you need to tune the runtime, gateway, and sandbox layers for real deployments. Defaults are tuned for development convenience and are deliberately loud about it (e.g. CORS `*` or missing `api_key` log a startup warning to stderr).
@@ -339,6 +419,60 @@ app = create_gateway(GatewayOptions(
 ```
 
 The HTTP middleware authenticates every `/api/*` request; the WebSocket handler performs the same `hmac.compare_digest` check inline before `accept()` because Starlette HTTP middleware does not run on WS handshakes. Concurrent `run_prompt` calls against the same `session_id` are serialised by `SessionEntry.lock`, so two parallel POSTs cannot interleave their `state.messages` mutations and break the OpenAI/Anthropic tool-call protocol.
+
+#### New prompts during tool approval
+
+`run_prompt()` raises `RuntimeError` without changing the conversation when an
+approval or uncleared tool batch remains. Resolve the approval with
+`approve_pending_tool()` or `reject_pending_tool()`, then await `resume()` to
+finish the original turn before sending new input. A batch may require multiple
+approvals. Rejected prompts are not queued, and direct SDK hosts must still
+serialise access to a runtime. See the
+[reproduction and repair report](docs/runtime-prompt-admission.md).
+
+#### Context compaction
+
+The `run.py` application enables context management and compaction by default.
+For direct SDK use, supply `CompactionOptions` and either a custom
+`CompactionStrategy` or `ContextOptions` to select the built-in summary strategy.
+Before every model
+call, TitanX sizes the current system prompt, tool definitions and messages,
+including new user input, tool arguments and results. Previous SDK summaries
+merge into one replacement summary; the rebuilt input must fit before it is
+committed. Original system instructions and recent complete tool groups remain.
+
+`CompactionOptions.token_budget` is the usable **input** budget after leaving
+room for output tokens and a safety margin. The default estimate uses serialized
+UTF-8 byte length and can compact early; it is not an exact model token count.
+Set `token_estimator(config, messages)` to a synchronous nonnegative integer
+counter matching your adapter's actual request format and tokenizer when needed.
+
+If the input cannot fit, the loop stops with `context_budget_exceeded`; if sizing
+fails, it stops with `token_estimation_failed`. Both emit `compaction_blocked`
+with the budget and available estimate. The transcript is retained, including
+oversized recent tool output. Hosts must handle these stop reasons, for example
+by using paginated tool results or a suitably sized model before resuming.
+Provider usage counters remain historical billing data. See the
+[issue report, reproduction and before/after diagrams](docs/context-compaction.md).
+
+For archived history and bounded recall, additionally pass
+`ContextOptions(store=SQLiteContextStore("./context.sqlite"))`. Large inspected
+tool outputs are saved before being replaced by previews and references;
+`context_search` and `context_read` recover original evidence without rerunning
+the original tool. Current goals and constraints live in host-owned `TaskState`,
+updated explicitly through `runtime.set_task(...)`.
+
+With context and compaction options configured, omitting the strategy selects
+the built-in `LlmCompactionStrategy(llm)`, which validates structured summaries
+and their source IDs. Configure `target_token_budget` below the input trigger,
+`summary_timeout_seconds`, and optional window/output/margin reserves. Adapters
+can implement `count_input_tokens(config, messages)`; an explicit estimator
+takes precedence. After resolving a context failure, use `retry_context()`.
+Archival remains opt-in for direct SDK use and does not restore in-flight
+execution across processes.
+
+See the [complete design, triggers, diagrams and configuration](docs/context-management.md).
+Run `.venv/bin/python run.py --check-context` for the offline archive/recall/compaction check.
 
 #### Cancellation protocol
 
