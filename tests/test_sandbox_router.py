@@ -83,6 +83,21 @@ class TestMinIsolationFloor:
         assert "wasm" in msg
         assert "docker" in msg
 
+    async def test_browser_request_never_falls_back_to_incapable_backend(self) -> None:
+        router = SandboxRouter([
+            _StubBackend("wasm"),
+            _StubBackend("docker"),
+        ])
+        with pytest.raises(RuntimeError) as exc_info:
+            await router.select(SandboxRouterInput(needs_browser=True))
+        msg = str(exc_info.value)
+        assert "supports_browser=False" in msg
+
+    async def test_remote_request_never_falls_back_to_local_backend(self) -> None:
+        router = SandboxRouter([_StubBackend("docker")])
+        with pytest.raises(RuntimeError, match="remote isolation"):
+            await router.select(SandboxRouterInput(requires_remote_isolation=True))
+
 
 class TestSelectionCallback:
     async def test_on_selection_called_with_request(self) -> None:

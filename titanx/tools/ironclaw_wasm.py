@@ -304,7 +304,11 @@ def create_ironclaw_wasm_handlers(
                     metadata=spec.metadata(),
                 ),
                 request_fn=request_fn,
-                policy=SandboxToolPolicy(preferred_backend="wasm", risk_level="low"),
+                policy=SandboxToolPolicy(
+                    preferred_backend="wasm",
+                    risk_level="low",
+                    min_isolation="wasm",
+                ),
             )
         )
     return handlers

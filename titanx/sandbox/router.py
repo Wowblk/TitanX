@@ -25,6 +25,7 @@ from typing import Awaitable, Callable
 
 from .types import (
     SandboxBackend,
+    SandboxBackendCapabilities,
     SandboxKind,
     SandboxRouterInput,
     SandboxSelection,
@@ -85,6 +86,15 @@ class SandboxRouter:
                 rejected.append((kind, "backend not registered"))
                 continue
             try:
+                capabilities = backend.capabilities()
+            except Exception as exc:
+                rejected.append((kind, f"capability probe raised: {exc!r}"))
+                continue
+            mismatch = self._capability_mismatch(kind, capabilities, request)
+            if mismatch is not None:
+                rejected.append((kind, mismatch))
+                continue
+            try:
                 available = await backend.is_available()
             except Exception as exc:
                 # An ``is_available`` raise is treated as "not
@@ -108,6 +118,35 @@ class SandboxRouter:
             "No sandbox backend is available for the requested execution profile "
             f"(min_isolation={request.min_isolation!r}; rejected: {trail})"
         )
+
+    @staticmethod
+    def _capability_mismatch(
+        kind: SandboxKind,
+        capabilities: SandboxBackendCapabilities,
+        request: SandboxRouterInput,
+    ) -> str | None:
+        """Return why a backend cannot satisfy the request, or ``None``.
+
+        Candidate ranking is only a preference order.  It must never be used
+        as proof that a backend actually implements the requested capability:
+        the historical router ranked Docker/WASM as fallbacks for browser or
+        remote workloads even though their capability descriptors explicitly
+        said otherwise.
+        """
+        if request.requires_remote_isolation and kind != "e2b":
+            return "does not provide required remote isolation"
+        if request.needs_browser and not capabilities.supports_browser:
+            return "supports_browser=False"
+        if request.needs_network and not capabilities.supports_network:
+            return "supports_network=False"
+        if request.needs_package_install and not capabilities.supports_package_install:
+            return "supports_package_install=False"
+        if (
+            request.needs_filesystem
+            and "filesystem" not in capabilities.supported_capabilities
+        ):
+            return "filesystem capability not advertised"
+        return None
 
     async def _notify_selection(
         self,
