@@ -322,9 +322,17 @@ class ExecutionGuard:
         if intent is None:
             return {}
         grant = self._grants.get(intent.execution_id)
+        thread_id, session_id, user_id, channel = intent.identity
         return {
             "execution_id": intent.execution_id, "run_id": intent.run_id,
             "batch_id": intent.batch_id, "ordinal": intent.ordinal,
             "policy_epoch": intent.policy_epoch,
             "approval_status": grant.status if grant else None,
+            # TXS-11: link every decision/execution record to the host
+            # identity+session and to the exact tool contract it authorized,
+            # so an audit reader can attribute the call without joining
+            # against mutable runtime state or the live tool catalog.
+            "thread_id": thread_id, "session_id": session_id,
+            "user_id": user_id, "channel": channel,
+            "contract_digest": intent.contract_digest,
         }

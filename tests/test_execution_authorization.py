@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import re
 from dataclasses import FrozenInstanceError, replace
 
 import pytest
@@ -87,6 +88,41 @@ async def test_exact_approval_dispatches_snapshot_once_and_audits_operation():
     assert invocation.details["approval_status"] == "consumed"
     assert "reviewed note" not in repr(invocation.details)
     assert pending.parameters == ARGS  # handler mutation stayed in its copy
+
+
+async def test_tool_audit_carries_identity_and_contract_digest():
+    runtime, _, _ = rig(tools=NoteTools(requires_approval=False))
+    await runtime.run_prompt("update the note")
+    entries = [
+        e for e in runtime._audit_log.get_entries()
+        if e.event in {"tool_decision", "tool_invocation"}
+    ]
+    assert {e.event for e in entries} == {"tool_decision", "tool_invocation"}
+    for entry in entries:
+        details = entry.details
+        assert details["thread_id"] == runtime.config.thread_id
+        assert details["session_id"] == runtime.config.session_id
+        assert details["user_id"] == runtime.config.user_id
+        assert details["channel"] == runtime.config.channel
+        assert re.fullmatch(r"[0-9a-f]{64}", details["contract_digest"])
+
+
+def test_tool_audit_contract_digest_identifies_the_contract():
+    call = ToolCall("unit-note", "write_note", copy.deepcopy(ARGS))
+
+    def digest_for(runtime_tools):
+        definitions = runtime_tools.list_tools()
+        config = create_config(available_tools=definitions)
+        guard = ExecutionGuard(PolicyStore(AgentPolicy()), definitions)
+        guard.start_run(config)
+        guard.prepare(copy.deepcopy(call), 0, config, definitions)
+        return guard.audit_details(0)["contract_digest"]
+
+    baseline = digest_for(NoteTools(requires_approval=False))
+    assert digest_for(NoteTools(requires_approval=False)) == baseline
+    altered = NoteTools(requires_approval=False)
+    altered.definition.description = "Different contract text"
+    assert digest_for(altered) != baseline
 
 
 async def test_public_approval_observation_is_not_an_authority_source():
