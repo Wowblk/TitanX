@@ -12,7 +12,7 @@ import asyncio
 import pytest
 
 from titanx.gateway.server import _check_api_key
-from titanx.gateway.session_registry import SessionRegistry
+from titanx.gateway.session_registry import SessionCapacityError, SessionRegistry
 from titanx.types import RuntimeHooks
 
 
@@ -94,3 +94,45 @@ class TestSessionRegistryBounds:
 
         a, b = await asyncio.gather(request(), request())
         assert a is b
+
+    async def test_active_session_is_never_ttl_or_lru_evicted(self) -> None:
+        registry = SessionRegistry(max_sessions=1, idle_ttl_seconds=0.01)
+        active = await registry.get_or_create(
+            "active", _create_runtime, RuntimeHooks()  # type: ignore[arg-type]
+        )
+        active.last_used = 0.0
+        await active.lock.acquire()
+        try:
+            assert registry.get("active") is active
+            with pytest.raises(SessionCapacityError, match="all sessions are active"):
+                await registry.get_or_create(
+                    "new", _create_runtime, RuntimeHooks()  # type: ignore[arg-type]
+                )
+            assert registry.get("active") is active
+        finally:
+            active.lock.release()
+
+        replacement = await registry.get_or_create(
+            "new", _create_runtime, RuntimeHooks()  # type: ignore[arg-type]
+        )
+        assert replacement is not active
+        assert "active" not in registry
+        assert "new" in registry
+
+    async def test_pending_approval_is_protected_even_without_locked_run(self) -> None:
+        registry = SessionRegistry(max_sessions=1, idle_ttl_seconds=0.01)
+        active = await registry.get_or_create(
+            "approval", _create_runtime, RuntimeHooks()  # type: ignore[arg-type]
+        )
+        active.runtime.state = type(
+            "State",
+            (),
+            {"pending_approval": object()},
+        )()
+        active.last_used = 0.0
+
+        assert registry.get("approval") is active
+        with pytest.raises(SessionCapacityError):
+            await registry.get_or_create(
+                "new", _create_runtime, RuntimeHooks()  # type: ignore[arg-type]
+            )

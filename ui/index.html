@@ -107,7 +107,10 @@
       <div id="messages"></div>
     </div>
     <div id="approval-banner" class="approval-banner">
-      <span>⚠️ Tool approval required</span>
+      <div style="min-width:0;flex:1">
+        <span>⚠️ Tool approval required</span>
+        <pre id="approval-details" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:160px;overflow:auto"></pre>
+      </div>
       <button id="approve-btn">Approve</button>
     </div>
     <div id="chat-input-area">
@@ -177,6 +180,7 @@ const sendBtn = document.getElementById("send-btn");
 const approvalBanner = document.getElementById("approval-banner");
 const approveBtn = document.getElementById("approve-btn");
 let streaming = false;
+let pendingApproval = null;
 let currentAssistantEl = null;
 
 function addMsg(role, text) {
@@ -240,24 +244,47 @@ function handleEvent(event) {
     const status = event.isError ? "❌" : "✅";
     addMsg("tool", status + " " + event.toolName + (event.isError ? " (error)" : ""));
   } else if (event.type === "pending_approval") {
+    pendingApproval = event.approval;
+    document.getElementById("approval-details").textContent =
+      pendingApproval.tool_name + " " + JSON.stringify(pendingApproval.parameters);
     approvalBanner.style.display = "flex";
-  } else if (event.type === "loop_end" && event.reason === "completed") {
+  } else if (event.type === "loop_end" && event.reason !== "pending_approval") {
     approvalBanner.style.display = "none";
     currentAssistantEl = null;
+    if (event.reason !== "completed") {
+      addMsg("error", "Run stopped: " + (event.reason || "unknown reason").replaceAll("_", " "));
+    }
   } else if (event.type === "error") {
     addMsg("error", "Error: " + event.message);
   } else if (event.type === "compaction_triggered") {
     addMsg("system", "✦ Context compressed");
+  } else if (event.type === "compaction_failed") {
+    addMsg("system", "Context compression failed" + (event.reason ? ": " + event.reason : "."));
+  } else if (event.type === "compaction_blocked") {
+    addMsg("error", "Context preparation blocked: " + event.reason.replaceAll("_", " "));
+  } else if (event.type === "compaction_exhausted") {
+    addMsg("error", "Context compression retry limit reached.");
   }
 }
 
 approveBtn.addEventListener("click", async () => {
-  await fetch(BASE + "/api/chat/approve", {
+  if (!pendingApproval) return;
+  const reviewed = pendingApproval;
+  const res = await fetch(BASE + "/api/chat/approve", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId }),
+    body: JSON.stringify({ sessionId, toolCallId: reviewed.tool_call_id,
+      executionId: reviewed.execution_id }),
   });
-  approvalBanner.style.display = "none";
+  if (!res.ok) {
+    const error = await res.json();
+    addMsg("error", error.error || "Approval failed");
+    return;
+  }
+  if (pendingApproval === reviewed) {
+    pendingApproval = null;
+    approvalBanner.style.display = "none";
+  }
 });
 
 // ── Memory ────────────────────────────────────────────────────────────────
