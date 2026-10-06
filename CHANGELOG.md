@@ -7,6 +7,20 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Until 1.0 is released, breaking changes may land in MINOR versions but will
 always be flagged in the **Changed** / **Removed** sections.
 
+## [Unreleased]
+
+### Fixed
+
+- **Tool audit records carry identity, session and tool contract** —
+  `ExecutionGuard.audit_details()` now emits `thread_id`, `session_id`,
+  `user_id`, `channel` (from the operation-bound `ToolIntent.identity`) and the
+  `contract_digest` alongside the existing execution IDs. `tool_decision` and
+  `tool_invocation` records routed through `audit_details()` — i.e. those that
+  reach a prepared `ToolIntent` — can now be attributed to the host
+  identity/session and to the exact tool contract that was authorized, as
+  required by TXS-11, without joining against mutable runtime state or the live
+  tool catalog (`docs/design-review-2026-10-07.md` problem #2).
+
 ## [0.4.0] - 2026-10-07
 
 ### Added
