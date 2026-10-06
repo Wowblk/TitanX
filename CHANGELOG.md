@@ -7,7 +7,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Until 1.0 is released, breaking changes may land in MINOR versions but will
 always be flagged in the **Changed** / **Removed** sections.
 
-## [Unreleased]
+## [0.4.0] - 2026-10-07
 
 ### Added
 
@@ -155,6 +155,17 @@ always be flagged in the **Changed** / **Removed** sections.
 - **SECURITY.md** — explicit trust model, in-scope defenses,
   out-of-scope assumptions, and a researcher preflight that points at
   the audit CLI.
+- **Background sandbox sessions** — `run_command` detects long-running
+  commands (`--watch`, `tail -f`, `redis-server`, …) and launches them in a
+  persistent Docker session instead of blocking the turn. The result returns a
+  `sessionId` plus log/status/pid paths that a later `run_command` call can
+  poll, inspect, or kill. Background work refuses the stateless WASM backend
+  and still passes through the host-side write-path whitelist.
+- **Package-install scanner** — `titanx.safety.package_scanner` adds static
+  pre-install analysis of package sources (no runtime wiring; opt-in).
+- **OpenAI-compatible provider adapter** — `OpenAIChatLlm` (OpenAI / Kimi /
+  Moonshot) selectable at the entry points via `TITANX_LLM_PROVIDER`; the
+  offline `EchoLlm` remains the default when no credentials are present.
 
 ### Changed
 
@@ -180,6 +191,13 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Fixed
 
+- **Default factory now arms sandbox write isolation** — `create_sandboxed_runtime`
+  shares a single `PolicyStore` between `SandboxedToolRuntime` and
+  `AgentRuntime`, so the write-path whitelist and its Docker mount propagation
+  are enforced in the default wiring (previously the tool layer saw `None` and
+  skipped the host-side check entirely). An explicit empty whitelist (`[]`)
+  fails closed instead of reading as "unrestricted"; `None` still means
+  "no whitelist configured" for direct SDK construction.
 - **Compaction summary accumulation and stale budget checks** — previous SDK
   summaries now merge into one replacement summary. Preflight sizes the current
   system prompt, tools, messages, arguments and results using a configurable
