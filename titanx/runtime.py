@@ -65,10 +65,14 @@ class AgentRuntime:
         from .policy import AgentPolicy, AuditLog, PolicyStore
 
         available_tools = list(tools.list_tools())
+        injected_context_tools: list[str] = []
         if context_options is not None:
             from .context.manager import CONTEXT_TOOL_NAMES, context_tool_definitions
             if any(tool.name in CONTEXT_TOOL_NAMES for tool in available_tools):
                 raise ValueError("context_read and context_search are reserved when context management is enabled")
+            injected_context_tools = [
+                definition.name for definition in context_tool_definitions()
+            ]
             available_tools.extend(context_tool_definitions())
         self.config: AgentConfig = create_config(
             user_id=user_id,
@@ -101,10 +105,14 @@ class AgentRuntime:
         # Always have a PolicyStore + AuditLog so every tool call is audited,
         # even when the caller did not configure dynamic policy.
         if policy_store is None:
+            # The runtime itself injects the context tools, so it also
+            # authorises them on the deny-by-default allowlist. Host tools are
+            # deliberately *not* seeded: the host must opt them in explicitly.
             policy_store = PolicyStore(
                 AgentPolicy(
                     auto_approve_tools=auto_approve_tools,
                     max_iterations=max_iterations,
+                    tool_allowlist=list(injected_context_tools),
                 ),
                 AuditLog(),
             )

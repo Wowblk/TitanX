@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable
 
+from titanx.policy import AgentPolicy, PolicyStore
 from titanx.runtime import AgentRuntime
 from titanx.safety.safety_layer import SafetyLayer
 from titanx.types import (
@@ -19,6 +20,27 @@ from titanx.types import (
     ToolExecutionResult,
     ToolRuntime,
 )
+
+
+def authorizing_policy_store(
+    tools: ToolRuntime | None = None,
+    *,
+    include_context: bool = False,
+    auto_approve_tools: bool = False,
+) -> PolicyStore:
+    """A policy store that explicitly allowlists the tools under test.
+
+    Deny-by-default means a registered non-approval tool must be on the
+    ``tool_allowlist``; tests whose subject is *not* the allowlist use this
+    helper to represent a host that has authorised its own registry.
+    """
+    names = {tool.name for tool in (tools.list_tools() if tools is not None else [])}
+    if include_context:
+        from titanx.context.manager import CONTEXT_TOOL_NAMES
+        names |= set(CONTEXT_TOOL_NAMES)
+    return PolicyStore(
+        AgentPolicy(tool_allowlist=sorted(names), auto_approve_tools=auto_approve_tools)
+    )
 
 
 class ScriptedLlm(LlmAdapter):
@@ -75,11 +97,13 @@ def make_runtime(
     hooks: RuntimeHooks | None = None,
     wrap_tool_output: bool = False,
 ) -> AgentRuntime:
+    runtime_tools = tools or NullTools()
     return AgentRuntime(
         llm=llm,
-        tools=tools or NullTools(),
+        tools=runtime_tools,
         safety=SafetyLayer(),
         max_iterations=max_iterations,
         hooks=hooks or RuntimeHooks(),
         wrap_tool_output=wrap_tool_output,
+        policy_store=authorizing_policy_store(runtime_tools),
     )

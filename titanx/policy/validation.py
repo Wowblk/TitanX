@@ -161,19 +161,27 @@ def _validate_write_path(value: object) -> None:
             )
 
 
-def _validate_tool_denylist(values: object) -> None:
+def _validate_tool_name_list(values: object, field_name: str) -> None:
     if not isinstance(values, list):
         raise PolicyValidationError(
-            f"tool_denylist must be a list of str, got {type(values).__name__}"
+            f"{field_name} must be a list of str, got {type(values).__name__}"
         )
     for entry in values:
         if not isinstance(entry, str):
             raise PolicyValidationError(
-                f"tool_denylist entries must be str, got "
+                f"{field_name} entries must be str, got "
                 f"{type(entry).__name__}: {entry!r}"
             )
         if not entry:
-            raise PolicyValidationError("tool_denylist entries must be non-empty")
+            raise PolicyValidationError(f"{field_name} entries must be non-empty")
+
+
+def _validate_tool_denylist(values: object) -> None:
+    _validate_tool_name_list(values, "tool_denylist")
+
+
+def _validate_tool_allowlist(values: object) -> None:
+    _validate_tool_name_list(values, "tool_allowlist")
 
 
 def _validate_max_iterations(value: object) -> None:
@@ -260,6 +268,10 @@ def validate_policy(policy: object) -> None:
     _validate_image_digest(getattr(policy, "image_digest", None))
 
     _validate_tool_denylist(policy.tool_denylist)
+
+    # ``tool_allowlist`` uses the same shape rules as the denylist so the two
+    # explicit tool-name planes cannot drift.
+    _validate_tool_allowlist(getattr(policy, "tool_allowlist", []))
 
     if not isinstance(policy.auto_approve_tools, bool):
         raise PolicyValidationError(

@@ -811,6 +811,7 @@ def load_policy_from_json(data: dict[str, Any]) -> AgentPolicy:
         auto_approve_tools=bool(data.get("auto_approve_tools", False)),
         max_iterations=int(data.get("max_iterations", 10)),
         tool_denylist=list(data.get("tool_denylist", [])),
+        tool_allowlist=list(data.get("tool_allowlist", [])),
         allowed_read_paths=list(data.get("allowed_read_paths", [])),
         image_digest=data.get("image_digest"),
     )

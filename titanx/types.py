@@ -17,6 +17,12 @@ class ToolDefinition:
     requires_approval: bool = False
     requires_sanitization: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    # A tool with ``mandatory_approval=True`` must never be satisfied by the
+    # coarse ``auto_approve_tools`` host opt-in: every call still pauses for an
+    # operation-bound approval. Reserved for external tool planes (e.g. MCP)
+    # where the remote policy requires human review that the host cannot
+    # globally waive.
+    mandatory_approval: bool = False
 
 
 @dataclass
