@@ -814,8 +814,12 @@ def _has_long(
 def _output_target(
     tokens: list[str], *, letter: str, long_name: str,
     value_shorts: frozenset[str], label: str, cwd: str | None,
+    dash_is_stdout: bool = True, siblings: frozenset[str] = frozenset(),
 ):
-    long_options = frozenset({long_name})
+    # `siblings` lets an abbreviation be resolved in context: `--output` is
+    # the exact spelling of a *different* option, so the `--output-dir` pass
+    # must not claim it (which would misread its value).
+    long_options = frozenset({long_name}) | siblings
     targets: list[str] = []
     j = 1
     while j < len(tokens):
@@ -828,7 +832,7 @@ def _output_target(
         matched_long = False
         if split is not None:
             canon, _ = _abbrev(split[0], long_options)
-            if canon is not None:
+            if canon == long_name:
                 matched_long = True
                 if split[1] is not None:
                     val = split[1]
@@ -841,8 +845,11 @@ def _output_target(
                     val = fused
                 elif j + 1 < len(tokens):
                     val, next_j = tokens[j + 1], j + 2
-        if val is not None and val != "-":
-            # A lone `-` means stdout (`curl -o -`, `wget -O -`), not a file.
+        if val is not None and not (dash_is_stdout and val == "-"):
+            # For a *file* output option a lone `-` means stdout (`curl -o -`,
+            # `wget -O -`) — not a path. For a directory option (`-P`,
+            # `--output-dir`) `-` is a literal relative directory, so it is
+            # resolved (and refused when no cwd is known).
             resolved = _resolve_path(val, cwd=cwd)
             if resolved is None:
                 return [], f"{label} target {val!r} cannot be statically resolved"
@@ -852,10 +859,18 @@ def _output_target(
 
 
 def _h_wget(tokens: list[str], *, cwd: str | None):
+    # wget's three output-ish long options share the `output-`/`output` prefix,
+    # so every pass resolves an abbreviation against all of them: `--output`
+    # is *ambiguous* (matches both `--output-document` and `--output-file`)
+    # and must be claimed by neither.
+    _wget_out_longs = frozenset(
+        {"output-document", "output-file", "directory-prefix"}
+    )
     # `-O`/`--output-document` names the downloaded file.
     targets, refuse = _output_target(
         tokens, letter="O", long_name="output-document",
         value_shorts=_WGET_VALUE_SHORTS, label="wget -O", cwd=cwd,
+        siblings=_wget_out_longs - {"output-document"},
     )
     if refuse:
         return [], refuse
@@ -865,6 +880,8 @@ def _h_wget(tokens: list[str], *, cwd: str | None):
         extra, refuse = _output_target(
             tokens, letter=letter, long_name=lname,
             value_shorts=_WGET_VALUE_SHORTS, label=f"wget -{letter}", cwd=cwd,
+            dash_is_stdout=(letter != "P"),
+            siblings=_wget_out_longs - {lname},
         )
         if refuse:
             return [], refuse
@@ -915,10 +932,13 @@ def _h_curl(tokens: list[str], *, cwd: str | None):
             "curl writes to a remote-derived filename that cannot be "
             "statically named — refusing"
         )
-    # `--output-dir DIR` is the directory the download lands in.
+    # `--output-dir DIR` is the directory the download lands in. `--output`
+    # (the file option above) is a *different* option — with `siblings` set,
+    # an exact `--output` resolves to itself, not to `--output-dir`.
     dir_targets, refuse = _output_target(
         tokens, letter="\x00", long_name="output-dir",
         value_shorts=frozenset(), label="curl --output-dir", cwd=cwd,
+        dash_is_stdout=False, siblings=frozenset({"output"}),
     )
     if refuse:
         return [], refuse

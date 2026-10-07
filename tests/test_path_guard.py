@@ -500,3 +500,26 @@ class TestUnnamedWriteTargets:
         scan = scan_shell_write_targets(command)
         assert scan.refuse_reason is None
         assert expected in scan.targets
+
+    @pytest.mark.parametrize("command", [
+        # A *directory* option's `-` is a literal relative directory, not
+        # stdout: `wget -P -` / `curl --output-dir -` create/use a directory
+        # named `-`. With no cwd to anchor it the path cannot be resolved, so
+        # per the fail-closed contract they must be refused. (An earlier pass
+        # reused the file-option `-`-means-stdout skip here and let these
+        # through with empty targets.)
+        "wget -P - http://h/x",
+        "wget --directory-prefix - http://h/x",
+        "wget --directory-prefix=- http://h/x",
+        "curl --output-dir - http://h/x",
+        "curl --output-dir=- http://h/x",
+    ])
+    def test_dash_output_dir_is_refused(self, command: str) -> None:
+        assert scan_shell_write_targets(command).refuse_reason is not None
+
+    def test_dash_output_dir_resolves_when_cwd_known(self) -> None:
+        # With a cwd the literal `-` directory *can* be named, so it is
+        # recorded rather than refused.
+        scan = scan_shell_write_targets("curl --output-dir - http://h/x", cwd="/work")
+        assert scan.refuse_reason is None
+        assert "/work/-" in scan.targets
