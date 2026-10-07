@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import os
 
-from titanx.types import AgentConfig, AgentState, LlmAdapter, LlmTurnResult
 from titanx.safety import SafetyLayer
 from titanx.runtime import AgentRuntime
 from titanx.gateway import GatewayOptions, create_gateway
-from titanx.types import RuntimeHooks
+from titanx.policy import AgentPolicy, PolicyStore
+from titanx.types import AgentConfig, AgentState, LlmAdapter, LlmTurnResult, RuntimeHooks
 from knowflow_agent.llm.kimi import KimiLlm
 from knowflow_agent.tools.knowflow import KnowFlowToolClient, KnowFlowToolRuntime
 import uvicorn
@@ -30,9 +30,30 @@ SYSTEM_PROMPT = """你是KnowFlow的个人 AI 助手，不再只是围绕单篇�
 - 不要发布、删除或修改已有知文；当前工具只允许创建私有草稿。
 """
 
+# The SDK's policy layer is deny-by-default: a registered tool that needs no
+# approval is still refused unless its name is allowlisted. Naming the four
+# KnowFlow tools here is what authorises the agent to call them.
+KNOWFLOW_TOOLS = [
+    "knowflow_search_posts",
+    "knowflow_get_post_detail",
+    "knowflow_get_my_posts",
+    "knowflow_create_draft",
+]
 
-def make_runtime(session_id: str, hooks: RuntimeHooks, body: dict | None = None):
-    body = body or {}
+
+def make_runtime(
+    session_id: str,
+    hooks: RuntimeHooks,
+    request_context: dict | None = None,
+) -> AgentRuntime:
+    """Build a session's runtime.
+
+    ``request_context`` is the gateway's opt-in hook (see ``GatewayOptions``):
+    it carries the ``POST /api/chat`` body — or the first WS frame — so the
+    per-user bearer token and user id can be bound when the session is created.
+    """
+    context = request_context or {}
+
     api_key = os.getenv("KIMI_API_KEY")
     llm: LlmAdapter
     if api_key:
@@ -44,21 +65,27 @@ def make_runtime(session_id: str, hooks: RuntimeHooks, body: dict | None = None)
     else:
         llm = EchoLlm()
 
-    token = str(body.get("toolBearerToken") or "").removeprefix("Bearer ").strip()
+    token = str(context.get("toolBearerToken") or "").removeprefix("Bearer ").strip()
     client = KnowFlowToolClient(
         base_url=os.getenv("KNOWFLOW_API_BASE_URL", "http://127.0.0.1:8080"),
         bearer_token=token,
     )
+
+    policy = AgentPolicy(
+        auto_approve_tools=True,
+        max_iterations=int(os.getenv("TITANX_MAX_ITERATIONS", "8")),
+        tool_allowlist=list(KNOWFLOW_TOOLS),
+    )
+
     return AgentRuntime(
         llm=llm,
         tools=KnowFlowToolRuntime(client),
         safety=SafetyLayer(),
-        user_id=str(body.get("userId") or "knowflow-user"),
+        user_id=str(context.get("userId") or "knowflow-user"),
         channel="knowflow-web",
         system_prompt=SYSTEM_PROMPT,
-        max_iterations=int(os.getenv("TITANX_MAX_ITERATIONS", "8")),
-        auto_approve_tools=True,
         hooks=hooks,
+        policy_store=PolicyStore(policy),
     )
 
 
