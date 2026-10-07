@@ -483,65 +483,72 @@ class McpAdmissionRuntime(ToolRuntime):
                 )
 
             client = self._clients[binding.server_id]
-            try:
-                # The structural client boundary is not assumed to be
-                # well-behaved.  A shallow ``dict(params)`` would still let a
-                # client mutate nested lists/dicts that belong to AgentState.
-                arguments = _normalize_json_value(params, path="arguments")
-            except McpProtocolError as exc:
-                return ToolExecutionResult(
-                    output=f"Invalid MCP tool arguments: {exc}",
-                    error="mcp_invalid_arguments",
-                )
-            try:
-                raw_result = await asyncio.wait_for(
-                    client.call_tool(
-                        binding.remote_name,
-                        arguments=arguments,
-                    ),
-                    timeout=self._policy.call_timeout_seconds,
-                )
-            except TimeoutError:
-                return ToolExecutionResult(
-                    output=(
-                        "MCP tool call exceeded "
-                        f"{self._policy.call_timeout_seconds:g} seconds"
-                    ),
-                    error="mcp_timeout",
-                )
-            except asyncio.CancelledError:
-                # Cancellation belongs to the host/runtime lifecycle.  The
-                # AgentRuntime closes the tool-call protocol and advances its
-                # cursor, so swallowing it here would corrupt resume semantics.
-                raise
-            except Exception as exc:
-                return ToolExecutionResult(
-                    output=(
-                        "MCP tool call failed before a valid result was "
-                        f"received ({type(exc).__name__})"
-                    ),
-                    error="mcp_transport_error",
-                )
+            remote_name = binding.remote_name
 
-            try:
-                normalized = extract_mcp_result(raw_result)
-            except McpProtocolError as exc:
-                return ToolExecutionResult(
-                    output=f"Invalid MCP tool result: {exc}",
-                    error="mcp_invalid_result",
-                )
-
-            normalized_output = normalized.to_output()
-            if len(normalized_output.encode("utf-8")) > self._policy.max_result_bytes:
-                return ToolExecutionResult(
-                    output="MCP tool result exceeded the configured size limit",
-                    error="mcp_result_too_large",
-                )
-
+        # The lock guards discovery/revalidation and the binding lookup, not
+        # the network round-trip. Holding it across ``call_tool`` serialized
+        # every MCP tool on this runtime, so one slow (or hung-until-timeout)
+        # server stalled the rest. ``binding``/``client`` are captured above;
+        # everything below is pure or awaits only the remote call.
+        try:
+            # The structural client boundary is not assumed to be
+            # well-behaved.  A shallow ``dict(params)`` would still let a
+            # client mutate nested lists/dicts that belong to AgentState.
+            arguments = _normalize_json_value(params, path="arguments")
+        except McpProtocolError as exc:
             return ToolExecutionResult(
-                output=normalized_output,
-                error="mcp_tool_error" if normalized.is_error else None,
+                output=f"Invalid MCP tool arguments: {exc}",
+                error="mcp_invalid_arguments",
             )
+        try:
+            raw_result = await asyncio.wait_for(
+                client.call_tool(
+                    remote_name,
+                    arguments=arguments,
+                ),
+                timeout=self._policy.call_timeout_seconds,
+            )
+        except TimeoutError:
+            return ToolExecutionResult(
+                output=(
+                    "MCP tool call exceeded "
+                    f"{self._policy.call_timeout_seconds:g} seconds"
+                ),
+                error="mcp_timeout",
+            )
+        except asyncio.CancelledError:
+            # Cancellation belongs to the host/runtime lifecycle.  The
+            # AgentRuntime closes the tool-call protocol and advances its
+            # cursor, so swallowing it here would corrupt resume semantics.
+            raise
+        except Exception as exc:
+            return ToolExecutionResult(
+                output=(
+                    "MCP tool call failed before a valid result was "
+                    f"received ({type(exc).__name__})"
+                ),
+                error="mcp_transport_error",
+            )
+
+        try:
+            normalized = extract_mcp_result(raw_result)
+        except McpProtocolError as exc:
+            return ToolExecutionResult(
+                output=f"Invalid MCP tool result: {exc}",
+                error="mcp_invalid_result",
+            )
+
+        normalized_output = normalized.to_output()
+        if len(normalized_output.encode("utf-8")) > self._policy.max_result_bytes:
+            return ToolExecutionResult(
+                output="MCP tool result exceeded the configured size limit",
+                error="mcp_result_too_large",
+            )
+
+        return ToolExecutionResult(
+            output=normalized_output,
+            error="mcp_tool_error" if normalized.is_error else None,
+        )
 
     async def _capture_snapshot_bounded(self) -> _DiscoverySnapshot:
         """Bound the whole discovery transaction, not only each page.

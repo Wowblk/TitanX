@@ -104,6 +104,27 @@ class FakeClient:
         return self.result
 
 
+class ConcurrencyProbeClient(FakeClient):
+    """Blocks each call until two calls have started, proving they overlap.
+
+    If ``execute`` serializes on the runtime lock, the second call never
+    starts, so the first blocks until ``timeout`` and the test fails.
+    """
+
+    def __init__(self, surfaces: list[list[FakeTool]]) -> None:
+        super().__init__(surfaces)
+        self._started = 0
+        self._both_started = asyncio.Event()
+
+    async def call_tool(self, name: str, arguments: dict[str, Any] | None = None):
+        self.call_calls.append((name, arguments))
+        self._started += 1
+        if self._started >= 2:
+            self._both_started.set()
+        await asyncio.wait_for(self._both_started.wait(), timeout=1.0)
+        return self.result
+
+
 def allow(
     server_id: str,
     *tool_names: str,
@@ -397,6 +418,25 @@ async def test_removed_unallowlisted_tool_is_surface_drift_and_fails_closed():
 
     assert result.error == "mcp_surface_drift"
     assert client.call_calls == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_mcp_execute_calls_are_not_serialized():
+    # A slow call on one tool must not block a call on another: the runtime
+    # lock guards discovery/revalidation, not the network round-trip.
+    tools = [FakeTool("search", OBJECT_SCHEMA), FakeTool("fetch", OBJECT_SCHEMA)]
+    client = ConcurrencyProbeClient([tools])
+    runtime = McpAdmissionRuntime(
+        {"github": client}, allow("github", "search", "fetch")
+    )
+    await runtime.discover()
+
+    results = await asyncio.gather(
+        runtime.execute("mcp__github__search", {}),
+        runtime.execute("mcp__github__fetch", {}),
+    )
+
+    assert [r.error for r in results] == [None, None]
 
 
 @pytest.mark.asyncio
