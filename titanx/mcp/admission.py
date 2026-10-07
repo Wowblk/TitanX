@@ -73,6 +73,12 @@ class McpClientLike(Protocol):
     official SDK's object attributes (``tools``, ``inputSchema``, ``content``,
     ``structuredContent``, and ``isError``), while also accepting equivalent
     mapping-shaped values from other transports and test doubles.
+
+    ``call_tool`` may be invoked concurrently with other in-flight calls on
+    the same client: the admission runtime no longer serializes tool calls
+    (only discovery is serialized). Implementations must be safe for
+    concurrent requests; the official ``mcp.ClientSession`` multiplexes by
+    request id and satisfies this.
     """
 
     async def list_tools(self, *, cursor: str | None = None) -> Any:

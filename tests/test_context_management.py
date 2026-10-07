@@ -650,6 +650,48 @@ def test_context_read_schema_max_matches_configured_read_max_chars(store):
     assert definition.parameters["properties"]["limit"]["maximum"] == 1234
 
 
+async def test_runtime_context_read_uses_configured_cap_end_to_end(store):
+    # The runtime derives the context tool catalog twice — at construction and
+    # again when re-checking the contract before dispatch. If the second path
+    # used a different cap, every context_read would fail with
+    # tool_contract_changed. Drive a real call through the runtime to pin it.
+    output = "log row\n" * 2000 + "TAIL_VALUE=9182"
+
+    async def execute(name, params):
+        return ToolExecutionResult(output=output)
+
+    class RecallLlm(LlmAdapter):
+        def __init__(self):
+            self.calls = 0
+
+        async def respond(self, config, state):
+            self.calls += 1
+            if self.calls == 1:
+                return LlmTurnResult(type="tool_calls", tool_calls=[ToolCall("read-1", "logs", {})])
+            if self.calls == 2:
+                tm = next(m for m in state.messages if isinstance(m, ToolMessage))
+                return LlmTurnResult(type="tool_calls", tool_calls=[ToolCall("recall-1", "context_read", {
+                    "kind": "artifact", "id": tm.artifact_id, "limit": 1234,
+                })])
+            return LlmTurnResult(type="text", text="done")
+
+    tool = SingleTool(ToolDefinition("logs", "Read logs", {}), execute)
+    runtime, _ = runtime_with_store(
+        store, RecallLlm(), tools=tool,
+        context=ContextOptions(
+            store, offload_threshold_chars=1500, preview_chars=150, read_max_chars=1234,
+        ),
+    )
+    await runtime.run_prompt("recall the tail")
+
+    recall = next(
+        m for m in runtime.state.messages
+        if isinstance(m, ToolMessage) and m.tool_name == "context_read"
+    )
+    page = json.loads(recall.content)
+    assert page["next_offset"] == 1234  # the configured cap applies, not 16000
+
+
 async def test_offload_preserves_wrapper_and_only_archives_inspected_output(store):
     async def execute(name, params):
         return ToolExecutionResult(output="raw output")
