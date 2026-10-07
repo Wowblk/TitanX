@@ -8,19 +8,24 @@ import json
 import os
 from pathlib import Path
 import sys
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 import urllib.error
 import urllib.request
 from uuid import uuid4
 
 from .context import CompactionOptions, ContextOptions, SQLiteContextStore
 from .factory import CreateSandboxedRuntimeOptions, create_sandboxed_runtime
+from .gateway.server import DEFAULT_HOST
 from .runtime import AgentRuntime
 from .safety import SafetyLayer
 from .types import (
     LlmAdapter, LlmTurnResult, LlmUsage, RuntimeHooks, ToolCall, ToolDefinition,
     ToolExecutionResult, ToolMessage, ToolRuntime,
 )
+
+if TYPE_CHECKING:
+    from .retrieval.types import HybridRetriever
+    from .storage.types import StorageBackend
 
 
 class EchoLlm(LlmAdapter):
@@ -220,8 +225,14 @@ class DemoApplication:
 
 def create_demo_gateway(
     data_dir: str | Path = ".titanx", *, port: int = 3000, llm: LlmAdapter | None = None,
+    storage: StorageBackend | None = None, retriever: HybridRetriever | None = None,
 ):
-    """Build an ASGI app without opening a database at import time."""
+    """Build an ASGI app without opening a database at import time.
+
+    ``storage``/``retriever`` are optional backend injections: when given,
+    the ``/api/memory``, ``/api/jobs`` and ``/api/logs`` routes serve real
+    data instead of returning 501. The demo opens no such backend itself.
+    """
     from .gateway import GatewayOptions, create_gateway
 
     def create_runtime(_client_session_id, hooks):
@@ -229,6 +240,7 @@ def create_demo_gateway(
 
     app = create_gateway(GatewayOptions(
         port=port, create_runtime=create_runtime,
+        storage=storage, retriever=retriever,
         allowed_origins=[f"http://127.0.0.1:{port}", f"http://localhost:{port}"],
     ))
     original_lifespan = app.router.lifespan_context
@@ -383,6 +395,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     mode.add_argument("--check-context", action="store_true", help="验证转存、回查和连续压缩")
     parser.add_argument("--data-dir", type=Path, default=Path(".titanx"), help="归档目录（默认 .titanx）")
     parser.add_argument("--port", type=int, default=3000, help="网页端口（默认 3000）")
+    parser.add_argument("--host", default=DEFAULT_HOST, help=f"网页绑定地址（默认 {DEFAULT_HOST}，仅本机）")
     args = parser.parse_args(argv)
     if args.prompt is not None and (args.web or args.check_context):
         parser.error("单次输入不能与 --web 或 --check-context 同时使用")
@@ -397,8 +410,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.web:
             import uvicorn
             app = create_demo_gateway(args.data_dir, port=args.port, llm=llm)
-            print(f"网页：http://127.0.0.1:{args.port}")
-            uvicorn.run(app, host="127.0.0.1", port=args.port)
+            print(f"网页：http://{args.host}:{args.port}")
+            uvicorn.run(app, host=args.host, port=args.port)
             return 0
         return asyncio.run(_run_terminal(args, llm))
     except KeyboardInterrupt:

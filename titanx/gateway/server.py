@@ -5,11 +5,11 @@ Hardened against the historical issues:
 1. ``hmac.compare_digest`` instead of ``==`` for the API-key check —
    string equality leaks timing information that lets an attacker
    recover the key one byte at a time over the network.
-2. Explicit auth dependency injected into HTTP routers AND the
-   WebSocket handler. Starlette's ``@app.middleware("http")`` does not
-   run on WS upgrades, so relying on a single HTTP middleware leaves
-   ``/api/chat/ws/{id}`` completely unauthenticated. The dependency
-   approach unifies both code paths.
+2. HTTP auth runs as ``@app.middleware("http")``; the WebSocket handler
+   in ``routes/chat.py`` calls the same ``_check_api_key`` inline.
+   Starlette's ``@app.middleware("http")`` does not run on WS upgrades,
+   so relying on the middleware alone would leave
+   ``/api/chat/ws/{id}`` completely unauthenticated.
 3. ``allow_origins`` is configurable. The default keeps ``["*"]`` for
    dev convenience but the docstring on ``GatewayOptions`` warns
    loudly. ``allow_credentials=False`` is implicit (we don't set it)
@@ -27,43 +27,50 @@ import hmac
 import os
 import sys
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from .types import GatewayOptions
 from .session_registry import SessionRegistry
-from .routes import chat_router, jobs_router, logs_router, memory_router
 
 
-def _check_api_key(provided: str | None, expected: str) -> bool:
-    """Constant-time API-key comparison.
+# Single default bind address for every entry point. 127.0.0.1 keeps the
+# gateway off the network by default; override per call / via --host.
+DEFAULT_HOST = "127.0.0.1"
+
+
+def _check_api_key(provided: str | None, expected: str | None) -> bool:
+    """The single, canonical API-key check for HTTP **and** WS.
+
+    Semantics (documented here once so the file, the middleware and the
+    WS handler cannot drift apart again):
+
+    - ``expected`` is falsy (``None`` or ``""``) -> no key is configured
+      -> the gateway is open -> allow (``True``). Every call site gates
+      on ``if options.api_key:``, so an empty key must mean "open" here
+      too or the helper would disagree with the gateway it protects.
+    - a key *is* configured -> require a non-empty ``provided`` that
+      matches ``expected``.
 
     ``hmac.compare_digest`` is the canonical defence against timing
     attacks that recover a secret one byte at a time. ``==`` returns as
     soon as it finds the first mismatching byte, which leaks the prefix
     length the attacker has already guessed correctly.
     """
+    if not expected:
+        return True
     if not provided:
         return False
     return hmac.compare_digest(provided, expected)
 
 
-def require_api_key(request: Request, options: GatewayOptions) -> None:
-    """Single auth gate used by HTTP routes AND WS handlers.
-
-    Raising ``HTTPException`` short-circuits FastAPI's response
-    pipeline; for WS we do the same check inline before
-    ``websocket.accept()``.
-    """
-    if not options.api_key:
-        return
-    provided = request.headers.get("x-api-key")
-    if not _check_api_key(provided, options.api_key):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthorized")
-
-
 def create_gateway(options: GatewayOptions) -> FastAPI:
+    # Imported here rather than at module scope: ``routes.chat`` imports
+    # this module's ``_check_api_key``, so a top-level import would form a
+    # cycle the moment ``titanx.gateway.routes.chat`` is imported first.
+    from .routes import chat_router, jobs_router, logs_router, memory_router
+
     if not options.api_key:
         # Loud, single-line, stderr-only — ``logging`` hasn't been
         # configured yet at this point, and we want this visible even
@@ -116,9 +123,9 @@ def create_gateway(options: GatewayOptions) -> FastAPI:
     async def http_auth_middleware(request: Request, call_next):
         # Note: this DOES NOT cover WebSocket connections — Starlette
         # routes WS handshakes through a separate code path that
-        # bypasses ``http`` middleware. The WS handler in chat.py
-        # performs its own ``_check_api_key`` call; do not remove that
-        # without first migrating it into a shared dependency.
+        # bypasses ``http`` middleware. The WS handler in chat.py calls
+        # the same ``_check_api_key`` inline; both paths share that one
+        # helper so they cannot drift apart.
         if options.api_key and request.url.path.startswith("/api/"):
             provided = request.headers.get("x-api-key")
             if not _check_api_key(provided, options.api_key):
@@ -142,7 +149,7 @@ def create_gateway(options: GatewayOptions) -> FastAPI:
     return app
 
 
-def run_gateway(options: GatewayOptions) -> None:
+def run_gateway(options: GatewayOptions, host: str = DEFAULT_HOST) -> None:
     import uvicorn
     app = create_gateway(options)
-    uvicorn.run(app, host="0.0.0.0", port=options.port)
+    uvicorn.run(app, host=host, port=options.port)

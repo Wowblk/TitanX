@@ -29,6 +29,28 @@ class TestApiKeyComparison:
     def test_empty_provided_rejected(self) -> None:
         assert _check_api_key("", "secret") is False
 
+    def test_unconfigured_key_allows_any_provided(self) -> None:
+        # No key configured (``expected is None``) means the gateway is
+        # open: any caller is allowed, key or not.
+        assert _check_api_key("whatever", None) is True
+        assert _check_api_key(None, None) is True
+
+    def test_falsy_expected_is_unconfigured_and_open(self) -> None:
+        # ``""`` is treated the same as ``None`` — the call sites gate on
+        # ``if options.api_key``, so an empty configured key must not
+        # silently reject everyone the gateway otherwise lets through.
+        assert _check_api_key("", "") is True
+        assert _check_api_key("anything", "") is True
+
+
+def test_ws_and_http_share_a_single_key_check() -> None:
+    # Regression guard for the duplicated-auth bug: the WS handler in
+    # ``routes/chat.py`` used to define its own ``_check_api_key`` with
+    # the OPPOSITE semantics. It must reuse the canonical one.
+    from titanx.gateway.routes import chat
+
+    assert chat._check_api_key is _check_api_key
+
 
 class _FakeRuntime:
     def __init__(self, sid: str) -> None:
