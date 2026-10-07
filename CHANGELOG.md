@@ -26,6 +26,11 @@ always be flagged in the **Changed** / **Removed** sections.
   rows are deleted so sessions no longer leak. Eviction tears down swept victims
   even if session creation subsequently fails, so a detached session cannot leak
   its sandbox/storage resources (`docs/design-review-2026-10-07.md` problem #6).
+- **`titanx-app` console script and demo wiring** — `pyproject.toml` now
+  registers `titanx-app = titanx.application:main` (the audit CLI remains
+  `titanx`), and `create_demo_gateway(storage=, retriever=)` accepts optional
+  backends so the `/api/memory`, `/api/jobs` and `/api/logs` routes are served
+  instead of always returning 501 (`docs/design-review-2026-10-07.md` problem #12).
 
 ### Changed
 
@@ -52,6 +57,26 @@ always be flagged in the **Changed** / **Removed** sections.
   a compaction-budget reserve only). Hosts can set the limit explicitly via
   `create_config(max_output_tokens=...)` or `AgentRuntime(max_output_tokens=...)`
   (`docs/design-review-2026-10-07.md` problem #7).
+- **Single canonical API-key check** — `titanx/gateway/chat.py` had a second
+  `_check_api_key` with the opposite semantics to the one in
+  `titanx/gateway/server.py`. There is now one documented helper: if no key is
+  configured the gateway is open; if a key is configured, a non-empty
+  constant-time match is required. The dead `require_api_key` was removed
+  (`docs/design-review-2026-10-07.md` problems #11, #15).
+- **Gateway bind default unified** — `create_gateway`/`run_gateway` and
+  `application.main` now default to loopback (`127.0.0.1`) and accept an
+  explicit host, instead of disagreeing between `127.0.0.1` and `0.0.0.0`
+  (`docs/design-review-2026-10-07.md` problem #12).
+- **`StorageBackend.save_log` deprecated** — the second audit table is no longer
+  a lossy path: `storage_secondary_sink` now stores the full audit record
+  (including `execution_id`/`run_id`/`batch_id`/`ordinal`/`policy_epoch` and the
+  remaining details). The `save_log` interface method is kept but marked
+  deprecated (`docs/design-review-2026-10-07.md` problem #13).
+- **`BreakGlassController.dispose()` rolls back (breaking)** — `dispose()` is now
+  **async** and restores the pre-break-glass policy instead of only cancelling
+  the expiry timer, so disposing cannot leave elevated permissions live. It is
+  idempotent and safe when no grant is active (`docs/design-review-2026-10-07.md`
+  problem #14).
 
 ### Fixed
 
@@ -64,6 +89,30 @@ always be flagged in the **Changed** / **Removed** sections.
   identity/session and to the exact tool contract that was authorized, as
   required by TXS-11, without joining against mutable runtime state or the live
   tool catalog (`docs/design-review-2026-10-07.md` problem #2).
+- **MCP `list_tools()` fails loud before `discover()`** — an undiscovered
+  `McpAdmissionRuntime` now raises `McpAdmissionError` instead of returning an
+  empty tool list, so a runtime constructed before discovery surfaces the
+  mistake at construction rather than silently dispatching `unknown_tool`
+  (`docs/design-review-2026-10-07.md` problem #8).
+- **Context store close/cancel hardening** — `SQLiteContextStore` raises a typed
+  `ContextStoreClosedError` (a `sqlite3.ProgrammingError` subclass) for
+  operations after `close()`, re-checks the closed flag under its lock, and makes
+  `close()` idempotent, so a cancelled/timed-out caller cannot wedge the store
+  (`docs/design-review-2026-10-07.md` problem #9).
+- **PTL drops the group the configured tokenizer ranks largest** —
+  `ContextCompactor` victim selection now uses `options.token_estimator` rather
+  than a byte-size estimate, and no longer deep-copies the frozen config on every
+  estimate (`docs/design-review-2026-10-07.md` problem #10).
+- **Documentation drift corrected** — demo transcript size, the compaction commit
+  condition, the compaction enable condition, `resume()` exclusivity, and the
+  pre-integration status table were corrected against the implementation
+  (`docs/design-review-2026-10-07.md` problem #16).
+
+### Removed
+
+- Dead runtime/gateway code: `AgentRuntime._effective_auto_approve`,
+  `AgentRuntime.wait_for_approval` (and its `_approval_event`), and the
+  unreachable `require_api_key` (`docs/design-review-2026-10-07.md` problem #15).
 
 ## [0.4.0] - 2026-10-07
 
