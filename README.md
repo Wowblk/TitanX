@@ -60,8 +60,19 @@ the unified application for compatibility. See the
 | `titanx/gateway/` | FastAPI gateway and UI serving |
 | `titanx/audit.py` | Programmatic security posture audit (CLI: `titanx audit`) |
 | `titanx/cli.py` | Command-line entry point for operator preflight |
+| `apps/knowflow/` | KnowFlow, a downstream application built on this SDK (see below) |
 | [`SECURITY.md`](./SECURITY.md) | Trust model, in-scope defenses, out-of-scope assumptions |
 | [`docs/security-principles/`](docs/security-principles/README.md) | Adopted security principles, OWASP 2026 references, and implementation gaps |
+
+## Downstream Applications
+
+`apps/knowflow/` holds KnowFlow — a knowledge-community product (Java backend, Go
+gateway, React frontend) whose AI assistant is built on this SDK. Its Python
+agent lives in `apps/knowflow/titanx-agent/` and depends on the SDK as a path
+dependency; there is no vendored SDK copy. Changes that belong to the SDK are
+made in `titanx/` here, not downstream. See
+[`apps/knowflow/titanx-agent/CLAUDE.md`](apps/knowflow/titanx-agent/CLAUDE.md)
+for the agent-specific notes.
 
 ## Secure MCP Admission
 

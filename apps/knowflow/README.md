@@ -9,9 +9,13 @@ KnowFlow/
   backend/       # Spring Boot 后端
   frontend/      # React + Vite 前端
   gateway/       # Go Mini-Gateway
-  titanx-agent/  # TitanX Agent 服务
+  titanx-agent/  # TitanX Agent 服务（依赖 monorepo 根目录的 TitanX SDK）
   docs/reports/  # 测试报告与压测结果
 ```
+
+> 本目录位于 TitanX monorepo 的 `apps/knowflow/` 下。Agent（`titanx-agent/`）直接依赖
+> 仓库根目录的 TitanX SDK 源码（路径依赖 `titanx @ file:../../..`），**不再内嵌 SDK 副本**。
+> 属于 SDK 的改动请改仓库根目录的 `titanx/`，而不是这里。
 
 ## 技术栈
 

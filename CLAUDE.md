@@ -16,8 +16,9 @@ python run.py "Hello, TitanX!"
 # Start the FastAPI gateway on http://localhost:3000
 python run.py --web
 
-# Tests (pytest + pytest-asyncio, asyncio_mode=auto)
-pytest                       # run everything
+# Tests (pytest + pytest-asyncio, asyncio_mode=auto). Scoped to tests/ via
+# testpaths; the KnowFlow agent suite under apps/ runs from its own directory.
+pytest                       # the SDK suite
 pytest tests/test_safety.py  # single file
 pytest -k router             # by keyword
 ```
@@ -70,6 +71,7 @@ AgentRuntime.run_prompt(input)
 | `titanx/retrieval/` | `HybridRetrieval` (vector + FTS), `MMR`, time-decay scoring |
 | `titanx/tools/ironclaw_wasm.py` | Optional IronClaw-inspired WASM tool catalog |
 | `titanx/gateway/` | FastAPI server; routes: `/api/chat`, `/api/memory`, `/api/jobs`, `/api/logs`; browser UI served from `../ui` |
+| `apps/knowflow/` | Downstream KnowFlow application (Java backend, Go gateway, React frontend, `titanx-agent/`); not part of the SDK package |
 
 ### Extension Points
 
@@ -80,3 +82,13 @@ AgentRuntime.run_prompt(input)
 - **Custom embedding**: implement `EmbeddingProvider` from `titanx/retrieval/types.py`.
 
 Use `create_sandboxed_runtime()` from `titanx/factory.py` to wire components together. `run.py` is the unified application entry; `titanx/application.py` shares context-enabled runtime wiring across terminal and gateway modes. `python run.py --check-context` runs the offline context walkthrough. The old scripts are compatibility wrappers; SDK constructors still leave context management opt-in.
+
+### Downstream: KnowFlow
+
+`apps/knowflow/` is a separate product built on this SDK; it is in this repo so
+the SDK has a single source of truth (the agent previously carried a vendored
+copy). Its agent lives in `apps/knowflow/titanx-agent/` and depends on the SDK as
+a path dependency (`titanx @ file:../../..`). SDK changes belong in `titanx/`
+here, never in a downstream copy. Run its suite from
+`apps/knowflow/titanx-agent/` (`python -m pytest -q`); the root `pytest` does not
+collect it. See `apps/knowflow/titanx-agent/CLAUDE.md` for details.
