@@ -35,6 +35,11 @@ from .types import GatewayOptions
 from .session_registry import SessionRegistry
 
 
+# Single default bind address for every entry point. 127.0.0.1 keeps the
+# gateway off the network by default; override per call / via --host.
+DEFAULT_HOST = "127.0.0.1"
+
+
 def _check_api_key(provided: str | None, expected: str | None) -> bool:
     """The single, canonical API-key check for HTTP **and** WS.
 
@@ -144,7 +149,7 @@ def create_gateway(options: GatewayOptions) -> FastAPI:
     return app
 
 
-def run_gateway(options: GatewayOptions) -> None:
+def run_gateway(options: GatewayOptions, host: str = DEFAULT_HOST) -> None:
     import uvicorn
     app = create_gateway(options)
-    uvicorn.run(app, host="0.0.0.0", port=options.port)
+    uvicorn.run(app, host=host, port=options.port)
