@@ -16,7 +16,7 @@ from titanx import (
 )
 from titanx.context import CompactionTracking, auto_compact_if_needed
 from titanx.context.manager import ContextManager
-from titanx.context.store import ContextStoreClosedError
+from titanx.context.store import ContextStore, ContextStoreClosedError
 from titanx.safety import SafetyLayer
 from titanx.state import create_config
 from titanx.types import (
@@ -127,6 +127,19 @@ async def test_closed_error_is_exported_and_legacy_catchable(tmp_path):
     await store.close()
     with pytest.raises(sqlite3.ProgrammingError):
         await store.archive("session", [UserMessage(role="user", content="x")])
+
+
+def test_context_store_base_declares_the_full_interface():
+    # §5.4: list_compactions/delete_session/close lived only on the concrete
+    # store, so the base interface could not be implemented or duck-typed
+    # against. The base must declare the whole contract the runtime and
+    # gateway teardown rely on.
+    required = {
+        "archive", "put_artifact", "read", "search", "commit_compaction",
+        "list_compactions", "save_task", "load_task", "delete_session", "close",
+    }
+    assert required <= set(dir(ContextStore))
+    assert required <= set(dir(SQLiteContextStore))
 
 
 async def test_cancelled_operation_does_not_wedge_store(tmp_path):
@@ -621,6 +634,20 @@ async def test_context_tool_cannot_select_session_or_request_unbounded_page(stor
     page = json.loads(result.output)
     assert len(page["content"]) == 100
     assert page["next_offset"] == 100
+
+
+def test_context_read_schema_max_matches_configured_read_max_chars(store):
+    # §5.4: the schema advertised ``maximum: 16000`` while execute silently
+    # clamped to ``read_max_chars`` (default 4000), so the advertised contract
+    # disagreed with the effective cap. The schema must reflect the real bound.
+    runtime, _ = runtime_with_store(
+        store, RecordingLlm([]),
+        context=ContextOptions(store, read_max_chars=1234),
+    )
+    definition = next(
+        tool for tool in runtime.config.available_tools if tool.name == "context_read"
+    )
+    assert definition.parameters["properties"]["limit"]["maximum"] == 1234
 
 
 async def test_offload_preserves_wrapper_and_only_archives_inspected_output(store):
