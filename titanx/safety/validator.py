@@ -47,9 +47,31 @@ class InputValidator(ValidatorLike):
         warnings: list[ValidationIssue] = []
 
         for key, value in params.items():
-            if isinstance(value, str):
-                result = self.validate_input(value, key)
-                errors.extend(result.errors)
-                warnings.extend(result.warnings)
+            self._scan_value(value, key, errors, warnings)
 
         return ValidationResult(is_valid=len(errors) == 0, errors=errors, warnings=warnings)
+
+    def _scan_value(
+        self,
+        value: Any,
+        field: str,
+        errors: list[ValidationIssue],
+        warnings: list[ValidationIssue],
+    ) -> None:
+        """Scan ``value`` for injections, recursing through containers.
+
+        Tool parameters are arbitrary JSON, so a trigger can be smuggled one
+        level down — ``{"payload": {"inner": "ignore previous instructions"}}``
+        — precisely to dodge a top-level-only scan. Walk dicts and lists so the
+        same defence applies at every depth.
+        """
+        if isinstance(value, str):
+            result = self.validate_input(value, field)
+            errors.extend(result.errors)
+            warnings.extend(result.warnings)
+        elif isinstance(value, dict):
+            for key, child in value.items():
+                self._scan_value(child, f"{field}.{key}", errors, warnings)
+        elif isinstance(value, (list, tuple)):
+            for index, child in enumerate(value):
+                self._scan_value(child, f"{field}[{index}]", errors, warnings)
