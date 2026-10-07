@@ -148,3 +148,78 @@ class TestWriteTargetDetectionGaps:
         scan = scan_shell_write_targets("tar cf /tmp/out.tar myxfile")
         assert scan.refuse_reason is None
         assert "/tmp/out.tar" in scan.targets
+
+
+class TestReviewHardeningGaps:
+    """Gaps found by a second adversarial pass over the first fix.
+
+    Two of these are regressions the first pass *introduced* — the rsync
+    `-t` collision and the tar cluster re-parse — which is why they are
+    pinned here alongside the originally-missed bundled-flag and wrapper
+    forms.
+    """
+
+    # ── rsync: `-t` is --times, NOT --target-directory ──────────────────
+    def test_rsync_times_flag_does_not_shadow_destination(self) -> None:
+        # `-t`/--times preserves mtimes; the destination is the last
+        # operand. Treating -t as a target dir dropped the real dest and
+        # recorded a bogus source path.
+        scan = scan_shell_write_targets("rsync -t /tmp/a /etc/passwd")
+        assert scan.refuse_reason is None
+        assert "/etc/passwd" in scan.targets
+        assert "/tmp/a" not in scan.targets
+
+    def test_rsync_plain_destination(self) -> None:
+        scan = scan_shell_write_targets("rsync -a src/ /etc/dst/")
+        assert scan.refuse_reason is None
+        assert "/etc/dst/" in scan.targets
+
+    # ── tar: cluster must not re-parse a following alpha source ─────────
+    def test_tar_dash_cluster_keeps_alpha_source_as_source(self) -> None:
+        scan = scan_shell_write_targets("tar -cf /etc/passwd foo")
+        assert scan.refuse_reason is None
+        assert "/etc/passwd" in scan.targets
+
+    def test_tar_dash_cluster_source_with_x_not_a_false_extract(self) -> None:
+        scan = scan_shell_write_targets("tar -cf /tmp/out.tar myxfile")
+        assert scan.refuse_reason is None
+        assert "/tmp/out.tar" in scan.targets
+
+    # ── bundled short-option clusters ───────────────────────────────────
+    @pytest.mark.parametrize("command,expected", [
+        ("cp -rt /etc foo", "/etc"),
+        ("mv -ft /etc foo", "/etc"),
+        ("install -Dt /usr/local/bin foo", "/usr/local/bin"),
+        ("sed -ni 's/a/b/' /etc/passwd", "/etc/passwd"),
+        ("curl -so /etc/x http://h/", "/etc/x"),
+        ("wget -qO /etc/x http://h/", "/etc/x"),
+    ])
+    def test_bundled_flag_forms_are_detected(self, command: str, expected: str) -> None:
+        targets = extract_shell_write_targets(command)
+        assert expected in targets, f"{command!r} -> {targets}"
+
+    # ── wrapper verbs must be unwrapped before the -c refusal ────────────
+    def test_cp_cluster_with_value_taking_S_is_not_a_target_dir(self) -> None:
+        # `-St` is -S<SUFFIX> (value "t"), not -t DIR; the destination is
+        # still the last operand (/etc/b), and /etc/a is the source.
+        scan = scan_shell_write_targets("cp -St /etc/a /etc/b")
+        assert scan.refuse_reason is None
+        assert "/etc/b" in scan.targets
+        assert "/etc/a" not in scan.targets
+
+    @pytest.mark.parametrize("command", [
+        "env bash -c 'echo x'",
+        "timeout 5 bash -c 'echo x'",
+        "nice -n 10 bash -c 'echo x'",
+        "nohup bash -c 'echo x'",
+        "xargs bash -c 'echo x'",
+        "env FOO=bar python3 -c 'import os'",
+    ])
+    def test_wrapped_inline_shell_is_refused(self, command: str) -> None:
+        scan = scan_shell_write_targets(command)
+        assert scan.refuse_reason is not None, f"{command!r} was not refused"
+
+    def test_wrapper_without_inline_code_is_not_refused(self) -> None:
+        scan = scan_shell_write_targets("timeout 5 tar cf /tmp/out.tar f")
+        assert scan.refuse_reason is None
+        assert "/tmp/out.tar" in scan.targets

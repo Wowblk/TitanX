@@ -223,15 +223,30 @@ def _canonical_ipv4_literal(host: str) -> str | None:
             return None
         values.append(value)
 
-    # inet_aton field widths: every component but the last is one byte;
-    # the last absorbs the remaining bytes (4 - (n-1)).
+    def _dotted(total: int) -> str:
+        return ".".join(str((total >> shift) & 0xFF) for shift in (24, 16, 8, 0))
+
+    # A single component is read as one bare 32-bit number. glibc's
+    # ``inet_aton`` (and the HTTP clients that inherit it) wrap such a
+    # number modulo 2**32 rather than rejecting it — ``4294967296`` is
+    # 0.0.0.0 and ``4294967297`` is 0.0.0.1 — so we wrap to match instead
+    # of letting an overflowing literal fall through to the allowlist.
+    if len(values) == 1:
+        if values[0] < 0:
+            return None
+        return _dotted(values[0] & 0xFFFFFFFF)
+
+    # Multi-component forms follow inet_aton field widths: every component
+    # but the last is one byte; the last absorbs the remaining bytes.
+    # Out-of-range octets (``999.1.1.1``) are rejected by inet_aton, so a
+    # name of that shape is not an IP and is left to the allowlist.
     widths = [1] * (len(values) - 1) + [4 - (len(values) - 1)]
     total = 0
     for value, width in zip(values, widths):
         if value < 0 or value >= (1 << (8 * width)):
             return None
         total = (total << (8 * width)) | value
-    return ".".join(str((total >> shift) & 0xFF) for shift in (24, 16, 8, 0))
+    return _dotted(total)
 
 
 def _classify_address(host: str) -> PrivateAddressDecision:

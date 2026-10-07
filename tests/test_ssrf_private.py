@@ -382,9 +382,20 @@ class TestNonCanonicalFalsePositives:
         # Not a valid IPv4 literal; a resolver would treat it as a name.
         assert _classify_address("1.2.3.4.5").blocked is False
 
-    def test_numeric_overflowing_integer_is_not_blocked(self) -> None:
-        # 2**32 does not fit an IPv4 address; not a valid literal.
-        assert _classify_address("4294967296").blocked is False
+    def test_integer_overflow_wraps_modulo_2_32_not_allowed(self) -> None:
+        # A bare integer literal wraps modulo 2**32 in inet_aton (and in
+        # the clients inheriting it): 2**32 -> 0.0.0.0, 2**32+1 -> 0.0.0.1.
+        # Both are private destinations and must not fall through.
+        zero = _classify_address("4294967296")
+        assert zero.blocked is True
+        assert zero.category in ("reserved", "private")
+        wrapped = _classify_address("4294967297")  # 2**32+1 -> 0.0.0.1
+        assert wrapped.blocked is True
+        assert wrapped.category in ("loopback", "private", "reserved")
+
+    def test_hex_integer_overflow_wraps_and_is_blocked(self) -> None:
+        decision = _classify_address("0x100000000")  # 2**32 -> 0.0.0.0
+        assert decision.blocked is True
 
     def test_alpha_hostname_still_passes(self) -> None:
         assert _classify_address("notanip.example.com").blocked is False

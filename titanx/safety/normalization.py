@@ -42,64 +42,55 @@ _HOMOGLYPH_TO_ASCII: dict[str, str] = {
 }
 
 
-# Code points that have no business inside user-supplied text and serve as
-# common pattern-matcher bypass primitives. See ``canonicalise_for_scan``
-# for usage.
+# Code points that render as nothing and serve as pattern-matcher bypass
+# primitives. Most fall under the Unicode ``Cf`` (format) category and are
+# caught by :func:`_is_invisible`'s category check; the entries here are
+# the ones that are *not* ``Cf`` but are equally invisible (blank glyphs
+# and filler letters), which no single Unicode property names for us.
 _INVISIBLE_CHARS = frozenset({
     "\u0000",  # NULL
-    "\u00ad",  # SOFT HYPHEN
-    "\u034f",  # COMBINING GRAPHEME JOINER
-    "\u061c",  # ARABIC LETTER MARK
-    "\u115f",  # HANGUL CHOSEONG FILLER
-    "\u1160",  # HANGUL JUNGSEONG FILLER
-    "\u17b4",  # KHMER VOWEL INHERENT AQ
-    "\u17b5",  # KHMER VOWEL INHERENT AA
-    "\u180e",  # MONGOLIAN VOWEL SEPARATOR
-    "\u200b",  # ZERO WIDTH SPACE
-    "\u200c",  # ZERO WIDTH NON-JOINER
-    "\u200d",  # ZERO WIDTH JOINER
-    "\u200e",  # LEFT-TO-RIGHT MARK
-    "\u200f",  # RIGHT-TO-LEFT MARK
-    "\u202a",  # LRE
-    "\u202b",  # RLE
-    "\u202c",  # PDF
-    "\u202d",  # LRO
-    "\u202e",  # RLO
-    "\u2060",  # WORD JOINER
-    "\u2061",  # FUNCTION APPLICATION
-    "\u2062",  # INVISIBLE TIMES
-    "\u2063",  # INVISIBLE SEPARATOR
-    "\u2064",  # INVISIBLE PLUS
+    "\u034f",  # COMBINING GRAPHEME JOINER (Mn)
+    "\u115f",  # HANGUL CHOSEONG FILLER (Lo)
+    "\u1160",  # HANGUL JUNGSEONG FILLER (Lo)
+    "\u17b4",  # KHMER VOWEL INHERENT AQ (Mn)
+    "\u17b5",  # KHMER VOWEL INHERENT AA (Mn)
+    "\u180b",  # MONGOLIAN FREE VARIATION SELECTOR ONE (Mn)
+    "\u180c",  # MONGOLIAN FREE VARIATION SELECTOR TWO (Mn)
+    "\u180d",  # MONGOLIAN FREE VARIATION SELECTOR THREE (Mn)
+    "\u180f",  # MONGOLIAN FREE VARIATION SELECTOR FOUR (Mn)
     "\u2065",  # unassigned (reserved invisible)
-    "\u2066",  # LRI
-    "\u2067",  # RLI
-    "\u2068",  # FSI
-    "\u2069",  # PDI
-    "\u3164",  # HANGUL FILLER
-    "\uffa0",  # HALFWIDTH HANGUL FILLER
-    "\ufeff",  # ZW NO-BREAK SPACE / BOM
+    "\u2800",  # BRAILLE PATTERN BLANK (So — renders as blank)
+    "\u3164",  # HANGUL FILLER (Lo)
+    "\uffa0",  # HALFWIDTH HANGUL FILLER (Lo)
+    "\ufffc",  # OBJECT REPLACEMENT CHARACTER (So — zero-width)
 })
 
 
 def _is_invisible(ch: str) -> bool:
     """True for characters that render as nothing and can only be abuse.
 
-    The curated set above covers the common cases, but two whole Unicode
-    *ranges* are equally invisible and just as effective at splitting a
-    trigger word: the tag block (``U+E0001`` and ``U+E0020``–``U+E007F``,
-    used for language tagging and to hide text from renderers) and the
-    variation-selector blocks (``U+FE00``–``U+FE0F`` and
-    ``U+E0100``–``U+E01EF``). Matching them by range means the fix cannot
-    be outrun by enumerating one more code point.
+    Rather than enumerate every invisible code point (a game the attacker
+    wins by finding one more), we lean on the Unicode **``Cf`` (format)**
+    category — the general class for characters that exist only to affect
+    rendering: BiDi overrides and isolates, interlinear annotation, the
+    shorthand/musical format controls, the deprecated ``U+206A``–``U+206F``
+    run, and the whole tag block (``U+E0020``–``U+E007F``). Two further
+    *ranges* are equally invisible and equally effective at splitting a
+    trigger word: the variation-selector blocks (``U+FE00``–``U+FE0F`` and
+    ``U+E0100``–``U+E01EF``). The curated set above then covers the
+    remaining blanks/fillers that are *not* ``Cf`` (Hangul fillers, the
+    Braille blank, Mongolian free variation selectors, ...).
     """
     if ch in _INVISIBLE_CHARS:
         return True
     code = ord(ch)
-    return (
+    if (
         0xE0000 <= code <= 0xE007F
         or 0xFE00 <= code <= 0xFE0F
         or 0xE0100 <= code <= 0xE01EF
-    )
+    ):
+        return True
+    return unicodedata.category(ch) == "Cf"
 
 
 def canonicalise_for_scan(text: str) -> str:

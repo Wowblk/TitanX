@@ -69,8 +69,14 @@ class SafetyLayer(SafetyLayerLike):
         Kept for backward compatibility with callers that bypass
         ``inspect_tool_output``. New runtime code uses the structured
         method instead.
+
+        Invisibles are stripped before redaction for the same reason as in
+        ``check_input``: ``victim@exa<ZWSP>mple.com`` renders as a plain
+        email but would not match the PII regex on the raw text.
         """
-        return {"content": self._redactor.redact(output).content}
+        return {
+            "content": self._redactor.redact(strip_invisible_chars(output)).content
+        }
 
     def inspect_tool_output(
         self,
@@ -118,7 +124,10 @@ class SafetyLayer(SafetyLayerLike):
             )
 
         if redact_pii:
-            redaction = self._redactor.redact(output)
+            # Strip invisibles first so a zero-width inside a PII token
+            # cannot keep it from matching the redactor (same rule as
+            # ``check_input`` / ``sanitize_tool_output``).
+            redaction = self._redactor.redact(strip_invisible_chars(output))
             return ToolOutputSafetyResult(
                 content=redaction.content,
                 violations=violations,

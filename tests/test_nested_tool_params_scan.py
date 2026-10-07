@@ -34,3 +34,32 @@ class TestNestedToolParams:
         params = {"outer": {"inner": INJECTION}}
         result = InputValidator().validate_tool_params(params)
         assert any(issue.field == "outer.inner" for issue in result.errors)
+
+
+class TestKeysAndNonListContainers:
+    """A second pass found two more ways to dodge the recursive scan.
+
+    ``validate_tool_params`` only walked *values*, so an injection placed
+    in a JSON object's **key** (attacker-controlled, e.g. a ``headers``
+    map) was never inspected; and the recursion only knew about
+    ``dict``/``list``/``tuple``, so a ``set`` value passed straight
+    through.
+    """
+
+    def test_injection_in_top_level_key_reported(self) -> None:
+        result = InputValidator().validate_tool_params({INJECTION: "x"})
+        assert result.is_valid is False
+
+    def test_injection_in_nested_key_reported(self) -> None:
+        result = InputValidator().validate_tool_params({"h": {INJECTION: "x"}})
+        assert result.is_valid is False
+
+    def test_injection_in_set_value_reported(self) -> None:
+        result = InputValidator().validate_tool_params({"tags": {INJECTION}})
+        assert result.is_valid is False
+
+    def test_clean_nested_keys_pass(self) -> None:
+        result = InputValidator().validate_tool_params(
+            {"headers": {"Accept": "application/json"}, "n": 1}
+        )
+        assert result.is_valid is True

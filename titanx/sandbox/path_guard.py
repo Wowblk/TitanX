@@ -42,6 +42,7 @@ import os
 import re
 import shlex
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
@@ -77,6 +78,16 @@ _INDETERMINATE_PATTERNS: tuple[re.Pattern[str], ...] = (
 _SHELL_INTERPRETERS = {"sh", "bash", "zsh", "ksh", "dash", "ash", "fish"}
 _SCRIPT_INTERPRETERS = {"python", "python2", "python3", "perl", "ruby", "node", "lua"}
 _INLINE_DYNAMIC_VERBS = {"eval", "exec", "source", "."}
+
+# Verbs that merely *launch* another command. `env bash -c '…'` would
+# otherwise hide the inline shell behind the wrapper's name — the -c
+# refusal lives on the verb, so the wrapper has to be peeled off first.
+_WRAPPER_VERBS = {"env", "nice", "nohup", "setsid", "time", "timeout",
+                  "stdbuf", "xargs"}
+
+# Wrapper options that take a numeric/duration operand (`nice -n 10`,
+# `timeout 5`, `stdbuf -o0`). Skipped when locating the wrapped command.
+_NUMERICISH_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
 
 # Top-level shell separators — splitting on these gives us per-command segments.
 _SEGMENT_SEPARATORS = {"&&", "||", ";", "|", "&"}
@@ -199,6 +210,34 @@ def _has_inline_code_flag(args: list[str], letters: str) -> bool:
     return False
 
 
+def _cluster_value(
+    tok: str, letter: str, value_letters: frozenset[str]
+) -> tuple[bool, str | None]:
+    """Find a value-taking short option inside a bundled flag cluster.
+
+    ``-so /etc/x`` bundles the boolean ``-s`` with the value-taking ``-o``:
+    the option letter is not at the start of the token, so a naive
+    ``tok.startswith("-o")`` misses it. Returns ``(present, fused)`` where
+    ``fused`` is the value attached to the letter (``-o/etc/x`` → ``/etc/x``)
+    or ``None`` when the value is the *next* token (``-so /etc/x``).
+
+    A cluster is only recognised when every letter before ``letter`` is a
+    boolean option — i.e. no other value-taking option precedes it. That is
+    what stops ``cp -St`` (``-S`` *suffix*, value ``t``) being read as
+    ``-t DIR``.
+    """
+    if not tok.startswith("-") or tok.startswith("--") or len(tok) < 2:
+        return (False, None)
+    body = tok[1:]
+    at = body.find(letter)
+    if at == -1:
+        return (False, None)
+    if any(ch in value_letters and ch != letter for ch in body[:at]):
+        return (False, None)
+    suffix = body[at + 1:]
+    return (True, suffix if suffix else None)
+
+
 def _scan_segment(tokens: list[str], *, cwd: str | None) -> ShellWriteScan:
     if not tokens:
         return ShellWriteScan()
@@ -213,19 +252,40 @@ def _scan_segment(tokens: list[str], *, cwd: str | None) -> ShellWriteScan:
                 ))
 
     # 2. Resolve the effective verb. Strip a leading path (`/bin/cp`, `./tee`)
-    #    and unwrap the `busybox <applet>` idiom so an unknown-name wrapper
-    #    cannot hide a write-capable verb. `cmd` keeps the verb token first so
-    #    the per-verb handlers (which start at index 1) work unchanged.
-    verb_offset = 0
-    verb = _basename(tokens[0])
-    if verb == "busybox":
-        j = 1
-        while j < len(tokens) and tokens[j].startswith("-"):
-            j += 1
-        if j < len(tokens):
-            verb_offset = j
-            verb = _basename(tokens[j])
-    cmd = tokens[verb_offset:]
+    #    and peel the `busybox <applet>` and launcher-wrapper (`env`, `nice`,
+    #    `timeout`, `xargs`, …) idioms, so an unknown-name wrapper cannot hide
+    #    a write-capable verb or an inline shell. `cmd` keeps the verb token
+    #    first so the per-verb handlers (which start at index 1) work unchanged.
+    cmd = tokens
+    while True:
+        verb = _basename(cmd[0])
+        if verb == "busybox":
+            j = 1
+            while j < len(cmd) and cmd[j].startswith("-"):
+                j += 1
+            if j < len(cmd):
+                cmd = cmd[j:]
+                continue
+        if verb in _WRAPPER_VERBS:
+            rest = cmd[1:]
+            i = 0
+            while i < len(rest):
+                tok = rest[i]
+                if tok.startswith("-"):
+                    i += 1
+                    continue
+                if verb == "env" and "=" in tok and "/" not in tok:
+                    i += 1  # env VAR=value assignment
+                    continue
+                if verb != "env" and _NUMERICISH_RE.match(tok):
+                    i += 1  # timeout/nice/stdbuf duration operand
+                    continue
+                break
+            if i < len(rest):
+                cmd = rest[i:]
+                continue
+        break
+    verb = _basename(cmd[0])
 
     # 3. Hard refuse: dynamic-code verbs.
     if verb in _INLINE_DYNAMIC_VERBS:
@@ -335,7 +395,9 @@ def _h_tee(tokens: list[str], *, cwd: str | None):
     return targets, None
 
 
-def _h_cp_mv_install(tokens: list[str], *, cwd: str | None):
+def _h_cp_mv_install(
+    tokens: list[str], *, cwd: str | None, value_letters: frozenset[str]
+):
     targets: list[str] = []
     positional: list[str] = []
     has_target_dir = False
@@ -348,18 +410,25 @@ def _h_cp_mv_install(tokens: list[str], *, cwd: str | None):
             dst, j = tokens[j + 1], j + 2
         elif tok.startswith("--target-directory="):
             dst, j = tok.split("=", 1)[1], j + 1
-        elif tok.startswith("-t") and len(tok) > 2 and not tok.startswith("--"):
-            dst, j = tok[2:], j + 1
-        elif tok.startswith("-"):
-            j += 1
-            continue
         else:
-            positional.append(tok)
-            j += 1
-            continue
-        # `-t DIR` names the destination explicitly; the positional operands
-        # are then sources only. Without this branch the real destination is
-        # skipped and a source operand is checked as if it were the target.
+            present, fused = _cluster_value(tok, "t", value_letters)
+            if not present:
+                if tok.startswith("-"):
+                    j += 1
+                    continue
+                positional.append(tok)
+                j += 1
+                continue
+            if fused is not None:
+                dst, j = fused, j + 1
+            elif j + 1 < len(tokens):
+                dst, j = tokens[j + 1], j + 2
+            else:
+                return [], "-t requires a directory argument"
+        # `-t DIR` (in any spelling) names the destination explicitly; the
+        # positional operands are then sources only. Without this branch the
+        # real destination is skipped and a source operand is checked as if
+        # it were the target.
         has_target_dir = True
         resolved = _resolve_path(dst, cwd=cwd)
         if resolved is None:
@@ -375,6 +444,25 @@ def _h_cp_mv_install(tokens: list[str], *, cwd: str | None):
     return targets, None
 
 
+def _h_rsync(tokens: list[str], *, cwd: str | None):
+    """rsync writes to its last operand; ``-t`` means ``--times`` here.
+
+    rsync has no ``--target-directory``, so the cp/mv/install ``-t``
+    handling must NOT apply — doing so recorded a source as the target and
+    dropped the real destination. Option values (``-e ssh``, ``--exclude
+    foo``) are operands that precede the destination, so "last positional
+    wins" stays correct.
+    """
+    positional = [t for t in tokens[1:] if not t.startswith("-")]
+    if not positional:
+        return [], None
+    dst = positional[-1]
+    resolved = _resolve_path(dst, cwd=cwd)
+    if resolved is None:
+        return [], f"rsync destination {dst!r} cannot be statically resolved"
+    return [resolved], None
+
+
 def _h_dd(tokens: list[str], *, cwd: str | None):
     targets: list[str] = []
     for tok in tokens[1:]:
@@ -388,18 +476,13 @@ def _h_dd(tokens: list[str], *, cwd: str | None):
 
 
 def _h_sed(tokens: list[str], *, cwd: str | None):
-    # In-place edit flags: `-i`, `-i.bak`, `-i~` (any fused suffix), and the
-    # long form `--in-place` / `--in-place=.bak`. The long form used to slip
-    # through, letting `sed --in-place s/a/b/ /etc/passwd` write unguarded.
-    inplace = any(
-        t == "--in-place" or t.startswith("--in-place=")
-        or (t.startswith("-i") and not t.startswith("--"))
-        for t in tokens[1:]
-    )
-    if not inplace:
-        return [], None
-
-    # Strip flag tokens; -e/-f consume the next token (script / script-file).
+    # In-place edit flags: `-i`, `-i.bak`, `-i~` (any fused suffix), the long
+    # form `--in-place` / `--in-place=.bak`, AND the bundled cluster `-ni`
+    # / `-Ei`. The long and bundled forms used to slip through, letting
+    # `sed --in-place …` or `sed -ni …` write unguarded.
+    # `-e`/`-f` consume the next token (script / script-file); skip those so
+    # a script that happens to look like a flag is not misread.
+    inplace = False
     files: list[str] = []
     j = 1
     while j < len(tokens):
@@ -407,13 +490,19 @@ def _h_sed(tokens: list[str], *, cwd: str | None):
         if tok in ("-e", "-f"):
             j += 2
             continue
-        if tok.startswith("-"):
+        if tok == "--in-place" or tok.startswith("--in-place="):
+            inplace = True
+            j += 1
+            continue
+        if tok.startswith("-") and not tok.startswith("--"):
+            if "i" in tok[1:]:
+                inplace = True
             j += 1
             continue
         files.append(tok)
         j += 1
 
-    if not files:
+    if not inplace or not files:
         return [], None
     # Conservative: when -e was not used, the first positional is the sed
     # script and everything after it is files. We can't reliably tell which
@@ -429,46 +518,55 @@ def _h_sed(tokens: list[str], *, cwd: str | None):
     return targets, None
 
 
-def _h_wget(tokens: list[str], *, cwd: str | None):
+# Short options that take a *value* for each tool. Used by ``_cluster_value``
+# so a bundled cluster (`-so`, `-qO`) is parsed without mistaking a value
+# (``-xproxy``) for the option.
+_WGET_VALUE_SHORTS = frozenset("OoaiPUetTw")
+_CURL_VALUE_SHORTS = frozenset("AbcdeEFHKmoPqrRTuUwxXyzY")
+
+
+def _output_target(
+    tokens: list[str], *, letter: str, long: str,
+    value_shorts: frozenset[str], label: str, cwd: str | None,
+):
     targets: list[str] = []
     j = 1
     while j < len(tokens):
         tok = tokens[j]
-        if tok in ("-O", "--output-document") and j + 1 < len(tokens):
-            val, j = tokens[j + 1], j + 2
-        elif tok.startswith("--output-document="):
-            val, j = tok.split("=", 1)[1], j + 1
-        elif tok.startswith("-O") and len(tok) > 2 and not tok.startswith("--"):
-            val, j = tok[2:], j + 1
+        val: str | None = None
+        consumed_next = False
+        if tok == long and j + 1 < len(tokens):
+            val, consumed_next = tokens[j + 1], True
+        elif tok.startswith(long + "="):
+            val = tok.split("=", 1)[1]
         else:
-            j += 1
-            continue
-        resolved = _resolve_path(val, cwd=cwd)
-        if resolved is None:
-            return [], f"wget -O target {val!r} cannot be statically resolved"
-        targets.append(resolved)
+            present, fused = _cluster_value(tok, letter, value_shorts)
+            if present:
+                if fused is not None:
+                    val = fused
+                elif j + 1 < len(tokens):
+                    val, consumed_next = tokens[j + 1], True
+        if val is not None:
+            resolved = _resolve_path(val, cwd=cwd)
+            if resolved is None:
+                return [], f"{label} target {val!r} cannot be statically resolved"
+            targets.append(resolved)
+        j += 2 if consumed_next else 1
     return targets, None
+
+
+def _h_wget(tokens: list[str], *, cwd: str | None):
+    return _output_target(
+        tokens, letter="O", long="--output-document",
+        value_shorts=_WGET_VALUE_SHORTS, label="wget -O", cwd=cwd,
+    )
 
 
 def _h_curl(tokens: list[str], *, cwd: str | None):
-    targets: list[str] = []
-    j = 1
-    while j < len(tokens):
-        tok = tokens[j]
-        if tok in ("-o", "--output") and j + 1 < len(tokens):
-            val, j = tokens[j + 1], j + 2
-        elif tok.startswith("--output="):
-            val, j = tok.split("=", 1)[1], j + 1
-        elif tok.startswith("-o") and len(tok) > 2 and not tok.startswith("--"):
-            val, j = tok[2:], j + 1
-        else:
-            j += 1
-            continue
-        resolved = _resolve_path(val, cwd=cwd)
-        if resolved is None:
-            return [], f"curl -o target {val!r} cannot be statically resolved"
-        targets.append(resolved)
-    return targets, None
+    return _output_target(
+        tokens, letter="o", long="--output",
+        value_shorts=_CURL_VALUE_SHORTS, label="curl -o", cwd=cwd,
+    )
 
 
 def _h_tar(tokens: list[str], *, cwd: str | None):
@@ -514,7 +612,6 @@ def _h_tar(tokens: list[str], *, cwd: str | None):
         return index
 
     index = 0
-    first_operand_seen = False
     while index < len(args):
         tok = args[index]
         if tok == "--":
@@ -536,15 +633,14 @@ def _h_tar(tokens: list[str], *, cwd: str | None):
         if tok.startswith("-") and len(tok) > 1:
             index = _consume_cluster(tok[1:], index + 1)
             continue
-        # No leading dash. In the old-style form the *first* such operand is
-        # the option cluster (`cf`, `xf`, `tvf`, …); every later operand is a
-        # file, so a source tree containing the letter `x` is not mistaken for
-        # an extract operation.
-        if not first_operand_seen and tok.isalpha():
-            first_operand_seen = True
+        # No leading dash. In the old-style form ONLY the first argument can
+        # be the option cluster (`cf`, `xf`, `tvf`, …); every later operand is
+        # a file. Restricting to index 0 is what stops a source tree named
+        # with an `x` (`tar -cf out.tar myxfile`) being re-parsed as an
+        # extract cluster after a dash-prefixed cluster was already seen.
+        if index == 0 and tok.isalpha():
             index = _consume_cluster(tok, index + 1)
             continue
-        first_operand_seen = True
         index += 1
 
     if extract:
@@ -561,10 +657,12 @@ def _h_tar(tokens: list[str], *, cwd: str | None):
 
 _VERB_HANDLERS: dict[str, Callable[..., tuple[list[str], str | None]]] = {
     "tee": _h_tee,
-    "cp": _h_cp_mv_install,
-    "mv": _h_cp_mv_install,
-    "install": _h_cp_mv_install,
-    "rsync": _h_cp_mv_install,
+    "cp": partial(_h_cp_mv_install, value_letters=frozenset({"S", "t"})),
+    "mv": partial(_h_cp_mv_install, value_letters=frozenset({"S", "t"})),
+    "install": partial(
+        _h_cp_mv_install, value_letters=frozenset({"S", "t", "g", "m", "o"})
+    ),
+    "rsync": _h_rsync,
     "dd": _h_dd,
     "sed": _h_sed,
     "wget": _h_wget,
