@@ -42,34 +42,55 @@ _HOMOGLYPH_TO_ASCII: dict[str, str] = {
 }
 
 
-# Code points that have no business inside user-supplied text and serve as
-# common pattern-matcher bypass primitives. See ``canonicalise_for_scan``
-# for usage.
+# Code points that render as nothing and serve as pattern-matcher bypass
+# primitives. Most fall under the Unicode ``Cf`` (format) category and are
+# caught by :func:`_is_invisible`'s category check; the entries here are
+# the ones that are *not* ``Cf`` but are equally invisible (blank glyphs
+# and filler letters), which no single Unicode property names for us.
 _INVISIBLE_CHARS = frozenset({
     "\u0000",  # NULL
-    "\u00ad",  # SOFT HYPHEN
-    "\u180e",  # MONGOLIAN VOWEL SEPARATOR
-    "\u200b",  # ZERO WIDTH SPACE
-    "\u200c",  # ZERO WIDTH NON-JOINER
-    "\u200d",  # ZERO WIDTH JOINER
-    "\u200e",  # LEFT-TO-RIGHT MARK
-    "\u200f",  # RIGHT-TO-LEFT MARK
-    "\u202a",  # LRE
-    "\u202b",  # RLE
-    "\u202c",  # PDF
-    "\u202d",  # LRO
-    "\u202e",  # RLO
-    "\u2060",  # WORD JOINER
-    "\u2061",  # FUNCTION APPLICATION
-    "\u2062",  # INVISIBLE TIMES
-    "\u2063",  # INVISIBLE SEPARATOR
-    "\u2064",  # INVISIBLE PLUS
-    "\u2066",  # LRI
-    "\u2067",  # RLI
-    "\u2068",  # FSI
-    "\u2069",  # PDI
-    "\ufeff",  # ZW NO-BREAK SPACE / BOM
+    "\u034f",  # COMBINING GRAPHEME JOINER (Mn)
+    "\u115f",  # HANGUL CHOSEONG FILLER (Lo)
+    "\u1160",  # HANGUL JUNGSEONG FILLER (Lo)
+    "\u17b4",  # KHMER VOWEL INHERENT AQ (Mn)
+    "\u17b5",  # KHMER VOWEL INHERENT AA (Mn)
+    "\u180b",  # MONGOLIAN FREE VARIATION SELECTOR ONE (Mn)
+    "\u180c",  # MONGOLIAN FREE VARIATION SELECTOR TWO (Mn)
+    "\u180d",  # MONGOLIAN FREE VARIATION SELECTOR THREE (Mn)
+    "\u180f",  # MONGOLIAN FREE VARIATION SELECTOR FOUR (Mn)
+    "\u2065",  # unassigned (reserved invisible)
+    "\u2800",  # BRAILLE PATTERN BLANK (So — renders as blank)
+    "\u3164",  # HANGUL FILLER (Lo)
+    "\uffa0",  # HALFWIDTH HANGUL FILLER (Lo)
+    "\ufffc",  # OBJECT REPLACEMENT CHARACTER (So — zero-width)
 })
+
+
+def _is_invisible(ch: str) -> bool:
+    """True for characters that render as nothing and can only be abuse.
+
+    Rather than enumerate every invisible code point (a game the attacker
+    wins by finding one more), we lean on the Unicode **``Cf`` (format)**
+    category — the general class for characters that exist only to affect
+    rendering: BiDi overrides and isolates, interlinear annotation, the
+    shorthand/musical format controls, the deprecated ``U+206A``–``U+206F``
+    run, and the whole tag block (``U+E0020``–``U+E007F``). Two further
+    *ranges* are equally invisible and equally effective at splitting a
+    trigger word: the variation-selector blocks (``U+FE00``–``U+FE0F`` and
+    ``U+E0100``–``U+E01EF``). The curated set above then covers the
+    remaining blanks/fillers that are *not* ``Cf`` (Hangul fillers, the
+    Braille blank, Mongolian free variation selectors, ...).
+    """
+    if ch in _INVISIBLE_CHARS:
+        return True
+    code = ord(ch)
+    if (
+        0xE0000 <= code <= 0xE007F
+        or 0xFE00 <= code <= 0xFE0F
+        or 0xE0100 <= code <= 0xE01EF
+    ):
+        return True
+    return unicodedata.category(ch) == "Cf"
 
 
 def canonicalise_for_scan(text: str) -> str:
@@ -99,14 +120,31 @@ def canonicalise_for_scan(text: str) -> str:
     # to fold or strip. The fast path (no homoglyphs, no invisibles) is the
     # common case for legitimate input and stays allocation-free.
     needs_rewrite = any(
-        ch in _HOMOGLYPH_TO_ASCII or ch in _INVISIBLE_CHARS
+        ch in _HOMOGLYPH_TO_ASCII or _is_invisible(ch)
         for ch in normalised
     )
     if not needs_rewrite:
         return normalised
     out: list[str] = []
     for ch in normalised:
-        if ch in _INVISIBLE_CHARS:
+        if _is_invisible(ch):
             continue
         out.append(_HOMOGLYPH_TO_ASCII.get(ch, ch))
     return "".join(out)
+
+
+def strip_invisible_chars(text: str) -> str:
+    """Remove invisible / formatting characters, keeping everything else.
+
+    Unlike :func:`canonicalise_for_scan` this does **not** NFKC-normalise or
+    fold homoglyphs — it only drops characters that render as nothing. It
+    exists so pattern matchers that are not allowed to rewrite visible text
+    (notably the PII redactor, which returns text to the user) can still
+    match a token an attacker split with a zero-width byte, e.g.
+    ``victim@exa\\u200bmple.com``.
+    """
+    if not text:
+        return text
+    if not any(_is_invisible(ch) for ch in text):
+        return text
+    return "".join(ch for ch in text if not _is_invisible(ch))

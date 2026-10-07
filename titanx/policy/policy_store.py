@@ -73,8 +73,9 @@ class PolicyStore(ReadonlyPolicyView):
         Decision precedence (most restrictive wins, TXS-02 deny-by-default):
           1. Tool is on the denylist                             -> deny
           2. Tool is unknown to the runtime                      -> deny
-          3. Tool requires approval and is ``mandatory_approval`` -> needs_approval
-             (``auto_approve_tools`` is deliberately skipped)
+          3. Tool is ``mandatory_approval``                      -> needs_approval
+             (``auto_approve_tools`` is deliberately skipped; the flag is
+             independent of ``requires_approval``)
           4. Tool requires approval, ``auto_approve_tools`` off  -> needs_approval
           5. Tool requires approval, ``auto_approve_tools`` on   -> allow
           6. Tool does not require approval and is allowlisted    -> allow
@@ -94,15 +95,21 @@ class PolicyStore(ReadonlyPolicyView):
                 reason=f"tool '{tool_call.name}' is not registered with the runtime",
             )
 
+        # ``mandatory_approval`` is an independent flag (see
+        # ``ToolDefinition``): it forces an operation-bound prompt whether or
+        # not the host also set ``requires_approval``. Checking it first means a
+        # merely-allowlisted tool cannot be dispatched silently just because the
+        # two flags disagree.
+        if tool_definition.mandatory_approval:
+            return PolicyCheckResult(
+                decision="needs_approval",
+                reason=(
+                    f"tool '{tool_call.name}' mandates approval and cannot be "
+                    "auto-approved"
+                ),
+            )
+
         if tool_definition.requires_approval:
-            if tool_definition.mandatory_approval:
-                return PolicyCheckResult(
-                    decision="needs_approval",
-                    reason=(
-                        f"tool '{tool_call.name}' mandates approval and cannot be "
-                        "auto-approved"
-                    ),
-                )
             if policy.auto_approve_tools:
                 return PolicyCheckResult(
                     decision="allow",

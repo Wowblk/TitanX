@@ -285,3 +285,117 @@ class TestAllowPrivateOptOut:
         ])
         decision = guard.check_url("http://10.0.0.5/", "GET")
         assert decision.allowed is False
+
+
+# ── Non-canonical / alternate-encoding bypasses ────────────────────────
+#
+# ``ipaddress.ip_address`` only accepts the canonical dotted-quad, so the
+# SSRF classifier missed every *other* spelling that libc's ``inet_aton``
+# (and therefore most HTTP clients) happily resolves: the bare 32-bit
+# integer (``2130706433``), hex (``0x7f000001``), octal (``0177.0.0.1``),
+# and short forms (``127.1``). It also missed the trailing-dot FQDN
+# (``metadata.google.internal.``), which is a valid spelling of the same
+# name and defeated the sentinel list. Each of these reached a private
+# destination while ``private_address_category`` stayed empty.
+
+def _make_advisory_guard(*, extra_blocked: tuple[str, ...] = ()) -> EgressGuard:
+    """A default-*allow* policy — the documented "advisory allowlist" posture.
+
+    The SSRF pre-filter is the only thing standing between a tool and a
+    private destination here, so it is the sharpest way to show the
+    bypass: pre-fix the request is allowed, post-fix it is refused.
+    """
+    return EgressGuard(EgressPolicy(
+        rules=[],
+        default_action="allow",
+        block_private_addresses=True,
+        extra_blocked_hostnames=extra_blocked,
+    ))
+
+
+class TestNonCanonicalAddressBypasses:
+    @pytest.mark.parametrize("addr,category", [
+        ("2130706433", "loopback"),      # 127.0.0.1 as a 32-bit int
+        ("0x7f000001", "loopback"),      # hex
+        ("0x7F000001", "loopback"),      # hex, upper-case
+        ("0177.0.0.1", "loopback"),      # octal first octet
+        ("127.1", "loopback"),           # 2-component short form
+        ("127.0.1", "loopback"),         # 3-component short form
+        ("127.0.0.1.", "loopback"),      # trailing dot on an IP
+        ("2130706433.", "loopback"),     # trailing dot on the integer form
+        ("3232235777", "private"),       # 192.168.1.1
+        ("2852039166", "link_local"),    # 169.254.169.254
+        ("0xa9fea9fe", "link_local"),    # 169.254.169.254 in hex
+    ])
+    def test_non_canonical_ipv4_forms_blocked(self, addr: str, category: str) -> None:
+        decision = _classify_address(addr)
+        assert decision.blocked is True, f"{addr!r} slipped past the SSRF check"
+        assert decision.category == category
+
+    def test_unspecified_integer_form_blocked(self) -> None:
+        decision = _classify_address("0")  # 0.0.0.0
+        assert decision.blocked is True
+        assert decision.category in ("reserved", "private")
+
+    @pytest.mark.parametrize("name", [
+        "metadata.google.internal.",
+        "METADATA.GOOGLE.INTERNAL.",
+        "instance-data.",
+        "metadata.azure.com.",
+    ])
+    def test_metadata_sentinel_trailing_dot_blocked(self, name: str) -> None:
+        decision = _classify_address(name)
+        assert decision.blocked is True, f"{name!r} dodged the sentinel list"
+        assert decision.category == "metadata_host"
+
+    def test_advisory_guard_blocks_non_canonical_loopback(self) -> None:
+        guard = _make_advisory_guard()
+        for url in (
+            "http://2130706433/admin",
+            "http://0x7f000001/admin",
+            "http://0177.0.0.1/admin",
+            "http://127.1/admin",
+        ):
+            decision = guard.check_url(url, "GET")
+            assert decision.allowed is False, url
+            assert decision.private_address_category == "loopback"
+
+    def test_advisory_guard_blocks_metadata_trailing_dot(self) -> None:
+        guard = _make_advisory_guard()
+        decision = guard.check_url(
+            "http://metadata.google.internal./computeMetadata/v1/", "GET"
+        )
+        assert decision.allowed is False
+        assert decision.private_address_category == "metadata_host"
+
+    def test_extra_blocked_hostname_trailing_dot(self) -> None:
+        guard = _make_advisory_guard(extra_blocked=("my-jumphost.internal",))
+        decision = guard.check_url("https://my-jumphost.internal./", "GET")
+        assert decision.allowed is False
+
+
+class TestNonCanonicalFalsePositives:
+    def test_public_trailing_dot_not_over_blocked(self) -> None:
+        assert _classify_address("api.example.com.").blocked is False
+
+    def test_five_component_dotted_quad_is_not_an_ip(self) -> None:
+        # Not a valid IPv4 literal; a resolver would treat it as a name.
+        assert _classify_address("1.2.3.4.5").blocked is False
+
+    def test_integer_overflow_wraps_modulo_2_32_not_allowed(self) -> None:
+        # A bare integer literal wraps modulo 2**32 in inet_aton (and in
+        # the clients inheriting it): 2**32 -> 0.0.0.0, 2**32+1 -> 0.0.0.1.
+        # Both are private destinations and must not fall through.
+        zero = _classify_address("4294967296")
+        assert zero.blocked is True
+        assert zero.category in ("reserved", "private")
+        wrapped = _classify_address("4294967297")  # 2**32+1 -> 0.0.0.1
+        assert wrapped.blocked is True
+        assert wrapped.category in ("loopback", "private", "reserved")
+
+    def test_hex_integer_overflow_wraps_and_is_blocked(self) -> None:
+        decision = _classify_address("0x100000000")  # 2**32 -> 0.0.0.0
+        assert decision.blocked is True
+
+    def test_alpha_hostname_still_passes(self) -> None:
+        assert _classify_address("notanip.example.com").blocked is False

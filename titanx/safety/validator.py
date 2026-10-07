@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from .normalization import canonicalise_for_scan
@@ -47,9 +48,37 @@ class InputValidator(ValidatorLike):
         warnings: list[ValidationIssue] = []
 
         for key, value in params.items():
-            if isinstance(value, str):
-                result = self.validate_input(value, key)
-                errors.extend(result.errors)
-                warnings.extend(result.warnings)
+            if isinstance(key, str) and key:
+                self._scan_value(key, f"<key:{key}>", errors, warnings)
+            self._scan_value(value, key, errors, warnings)
 
         return ValidationResult(is_valid=len(errors) == 0, errors=errors, warnings=warnings)
+
+    def _scan_value(
+        self,
+        value: Any,
+        field: str,
+        errors: list[ValidationIssue],
+        warnings: list[ValidationIssue],
+    ) -> None:
+        """Scan ``value`` for injections, recursing through containers.
+
+        Tool parameters are arbitrary JSON, so a trigger can be smuggled one
+        level down — ``{"payload": {"inner": "ignore previous instructions"}}``
+        — precisely to dodge a top-level-only scan. Walk mappings (keys
+        *and* values, since a JSON object's keys are attacker-controlled
+        strings too), sequences, and sets so the same defence applies at
+        every depth a tool can nest data.
+        """
+        if isinstance(value, str):
+            result = self.validate_input(value, field)
+            errors.extend(result.errors)
+            warnings.extend(result.warnings)
+        elif isinstance(value, Mapping):
+            for key, child in value.items():
+                if isinstance(key, str) and key:
+                    self._scan_value(key, f"{field}.<key:{key}>", errors, warnings)
+                self._scan_value(child, f"{field}.{key}", errors, warnings)
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            for index, child in enumerate(value):
+                self._scan_value(child, f"{field}[{index}]", errors, warnings)
