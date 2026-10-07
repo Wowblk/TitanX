@@ -4,7 +4,7 @@ import asyncio
 import json
 from typing import Any
 
-from titanx.tools.knowflow import KnowFlowToolClient, KnowFlowToolRuntime
+from knowflow_agent.tools.knowflow import KnowFlowToolClient, KnowFlowToolRuntime
 
 
 class _FakeResponse:
@@ -33,7 +33,7 @@ class _UrlopenRecorder:
 
 def test_search_posts_calls_knowflow_search_api(monkeypatch: Any) -> None:
     recorder = _UrlopenRecorder({"items": [{"id": "42", "title": "网关"}]})
-    monkeypatch.setattr("titanx.tools.knowflow.urlopen", recorder)
+    monkeypatch.setattr("knowflow_agent.tools.knowflow.urlopen", recorder)
 
     runtime = KnowFlowToolRuntime(KnowFlowToolClient(
         base_url="http://127.0.0.1:8080",
@@ -46,12 +46,12 @@ def test_search_posts_calls_knowflow_search_api(monkeypatch: Any) -> None:
     request, _ = recorder.requests[0]
     assert request.full_url == "http://127.0.0.1:8080/api/v1/search?q=%E7%BD%91%E5%85%B3&size=10"
     assert request.get_header("Authorization") == "Bearer jwt-token"
-    assert json.loads(result.output)["items"][0]["title"] == "网关"
+    assert result.output == "找到这些相关知文：\n- 网关（ID：42）"
 
 
 def test_create_draft_posts_to_agent_tool_endpoint(monkeypatch: Any) -> None:
     recorder = _UrlopenRecorder({"draftId": "1001"})
-    monkeypatch.setattr("titanx.tools.knowflow.urlopen", recorder)
+    monkeypatch.setattr("knowflow_agent.tools.knowflow.urlopen", recorder)
 
     runtime = KnowFlowToolRuntime(KnowFlowToolClient(
         base_url="http://localhost:8380",
@@ -69,7 +69,22 @@ def test_create_draft_posts_to_agent_tool_endpoint(monkeypatch: Any) -> None:
     assert request.get_method() == "POST"
     assert request.get_header("Content-type") == "application/json"
     assert json.loads(request.data.decode("utf-8"))["title"] == "标题"
-    assert json.loads(result.output)["draftId"] == "1001"
+    assert result.output == "草稿已创建成功，草稿 ID：1001。你可以到创作/我的草稿里继续编辑。"
+
+
+def test_search_posts_with_no_matches_reports_so_in_chinese(monkeypatch: Any) -> None:
+    recorder = _UrlopenRecorder({"items": []})
+    monkeypatch.setattr("knowflow_agent.tools.knowflow.urlopen", recorder)
+
+    runtime = KnowFlowToolRuntime(KnowFlowToolClient(
+        base_url="http://127.0.0.1:8080",
+        bearer_token="jwt-token",
+    ))
+
+    result = asyncio.run(runtime.execute("knowflow_search_posts", {"query": "无结果"}))
+
+    assert result.error is None
+    assert result.output == "没有找到相关知文。你可以换一个关键词再试。"
 
 
 def test_knowflow_tools_return_directly() -> None:
@@ -80,7 +95,7 @@ def test_knowflow_tools_return_directly() -> None:
 
     tools = {item.name: item for item in runtime.list_tools()}
 
-    assert tools["knowflow_search_posts"].metadata["return_direct"] is True
-    assert tools["knowflow_get_post_detail"].metadata["return_direct"] is True
-    assert tools["knowflow_get_my_posts"].metadata["return_direct"] is True
-    assert tools["knowflow_create_draft"].metadata["return_direct"] is True
+    assert tools["knowflow_search_posts"].return_direct is True
+    assert tools["knowflow_get_post_detail"].return_direct is True
+    assert tools["knowflow_get_my_posts"].return_direct is True
+    assert tools["knowflow_create_draft"].return_direct is True

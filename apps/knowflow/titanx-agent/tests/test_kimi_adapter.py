@@ -2,19 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
-import types
-from pathlib import Path
 from typing import Any
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-_TITANX_ROOT = _REPO_ROOT / "titanx"
-_titanx_package = types.ModuleType("titanx")
-_titanx_package.__path__ = [str(_TITANX_ROOT)]
-sys.modules.setdefault("titanx", _titanx_package)
-sys.path.insert(0, str(_REPO_ROOT))
-
-from titanx.llm import KimiLlm
+from knowflow_agent.llm.kimi import KimiLlm
 from titanx.state import create_config, create_initial_state
 from titanx.types import AssistantMessage, ToolCall, ToolDefinition, ToolMessage, UserMessage
 
@@ -48,7 +38,7 @@ def test_text_response_parsing(monkeypatch: Any) -> None:
         "choices": [{"message": {"role": "assistant", "content": "Hello from Kimi"}}],
         "usage": {"prompt_tokens": 12, "completion_tokens": 5},
     })
-    monkeypatch.setattr("titanx.llm.kimi.urlopen", recorder)
+    monkeypatch.setattr("knowflow_agent.llm.kimi.urlopen", recorder)
 
     llm = KimiLlm(api_key="test-key")
     result = asyncio.run(
@@ -84,7 +74,7 @@ def test_tool_call_response_parsing(monkeypatch: Any) -> None:
         }],
         "usage": {"prompt_tokens": 9, "completion_tokens": 4},
     })
-    monkeypatch.setattr("titanx.llm.kimi.urlopen", recorder)
+    monkeypatch.setattr("knowflow_agent.llm.kimi.urlopen", recorder)
 
     result = asyncio.run(
         KimiLlm(api_key="test-key").respond(
@@ -108,7 +98,7 @@ def test_request_url_uses_moonshot_v1_chat_completions(monkeypatch: Any) -> None
         "choices": [{"message": {"role": "assistant", "content": "ok"}}],
         "usage": {},
     })
-    monkeypatch.setattr("titanx.llm.kimi.urlopen", recorder)
+    monkeypatch.setattr("knowflow_agent.llm.kimi.urlopen", recorder)
 
     asyncio.run(
         KimiLlm(api_key="test-key", base_url="https://api.moonshot.cn").respond(
@@ -130,7 +120,7 @@ def test_tools_are_serialized_from_agent_config(monkeypatch: Any) -> None:
         "choices": [{"message": {"role": "assistant", "content": "ok"}}],
         "usage": {},
     })
-    monkeypatch.setattr("titanx.llm.kimi.urlopen", recorder)
+    monkeypatch.setattr("knowflow_agent.llm.kimi.urlopen", recorder)
     tool = ToolDefinition(
         name="search_memory",
         description="Search personal memory.",

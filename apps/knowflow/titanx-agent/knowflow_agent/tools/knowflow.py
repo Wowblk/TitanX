@@ -8,7 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from ..types import ToolDefinition, ToolExecutionResult, ToolRuntime
+from titanx.types import ToolDefinition, ToolExecutionResult, ToolRuntime
 
 
 def _schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -83,7 +83,7 @@ class KnowFlowToolRuntime(ToolRuntime):
                     },
                     ["query"],
                 ),
-                metadata={"return_direct": True},
+                return_direct=True,
             ),
             ToolDefinition(
                 name="knowflow_get_post_detail",
@@ -92,7 +92,7 @@ class KnowFlowToolRuntime(ToolRuntime):
                     {"post_id": {"type": "string", "description": "Knowledge post id."}},
                     ["post_id"],
                 ),
-                metadata={"return_direct": True},
+                return_direct=True,
             ),
             ToolDefinition(
                 name="knowflow_get_my_posts",
@@ -103,7 +103,7 @@ class KnowFlowToolRuntime(ToolRuntime):
                         "size": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
                     }
                 ),
-                metadata={"return_direct": True},
+                return_direct=True,
             ),
             ToolDefinition(
                 name="knowflow_create_draft",
@@ -124,16 +124,65 @@ class KnowFlowToolRuntime(ToolRuntime):
                     },
                     ["title", "content"],
                 ),
-                metadata={"return_direct": True},
+                return_direct=True,
             ),
         ]
 
     async def execute(self, name: str, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             output = await self._execute(name, params)
-            return ToolExecutionResult(output=json.dumps(output, ensure_ascii=False))
         except Exception as exc:
             return ToolExecutionResult(output=str(exc), error=type(exc).__name__)
+        return ToolExecutionResult(output=self._format_output(name, output))
+
+    def _format_output(self, name: str, data: dict[str, Any]) -> str:
+        """Render a tool result as the assistant's own reply.
+
+        The KnowFlow tools are ``return_direct``, so their output is shown to the
+        user verbatim instead of being summarised by the LLM. Keep the wording
+        here (application side); the SDK only ends the turn on the output.
+        """
+        if name == "knowflow_search_posts":
+            items = data.get("items") or []
+            if not items:
+                return "没有找到相关知文。你可以换一个关键词再试。"
+            lines = ["找到这些相关知文："]
+            for item in items[:5]:
+                title = item.get("title") or "未命名知文"
+                post_id = item.get("id") or ""
+                description = item.get("description") or ""
+                suffix = f"：{description}" if description else ""
+                lines.append(f"- {title}（ID：{post_id}）{suffix}")
+            return "\n".join(lines)
+
+        if name == "knowflow_get_my_posts":
+            items = data.get("items") or []
+            if not items:
+                return "你目前没有已发布的知文。草稿不会出现在“已发布内容”列表里。"
+            lines = ["你已发布的知文有："]
+            for item in items[:10]:
+                title = item.get("title") or "未命名知文"
+                post_id = item.get("id") or ""
+                description = item.get("description") or ""
+                suffix = f"：{description}" if description else ""
+                lines.append(f"- {title}（ID：{post_id}）{suffix}")
+            return "\n".join(lines)
+
+        if name == "knowflow_get_post_detail":
+            title = data.get("title") or "未命名知文"
+            post_id = data.get("id") or ""
+            description = data.get("description") or "暂无摘要"
+            tags = data.get("tags") or []
+            tag_text = "、".join(tags) if tags else "无标签"
+            return f"{title}（ID：{post_id}）\n摘要：{description}\n标签：{tag_text}"
+
+        if name == "knowflow_create_draft":
+            draft_id = data.get("draftId")
+            if draft_id:
+                return f"草稿已创建成功，草稿 ID：{draft_id}。你可以到创作/我的草稿里继续编辑。"
+            return "草稿已创建成功。你可以到创作/我的草稿里继续编辑。"
+
+        return json.dumps(data, ensure_ascii=False)
 
     async def _execute(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
         if name == "knowflow_search_posts":

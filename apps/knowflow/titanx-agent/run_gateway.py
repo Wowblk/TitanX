@@ -1,17 +1,15 @@
 """Start the TitanX gateway for the local KnowFlow agent assistant."""
 from __future__ import annotations
 
-import sys
 import os
-sys.path.insert(0, os.path.dirname(__file__))
 
 from titanx.types import AgentConfig, AgentState, LlmAdapter, LlmTurnResult
 from titanx.safety import SafetyLayer
 from titanx.runtime import AgentRuntime
 from titanx.gateway import GatewayOptions, create_gateway
 from titanx.types import RuntimeHooks
-from titanx.llm import KimiLlm
-from titanx.tools import KnowFlowToolClient, KnowFlowToolRuntime
+from knowflow_agent.llm.kimi import KimiLlm
+from knowflow_agent.tools.knowflow import KnowFlowToolClient, KnowFlowToolRuntime
 import uvicorn
 
 

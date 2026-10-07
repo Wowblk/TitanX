@@ -1,22 +1,13 @@
 [project]
-name = "titanx"
-version = "0.1.0"
-description = "Agent SDK with explicit runtime semantics, multi-layer security, and sandboxed tool execution"
+name = "knowflow-agent"
+version = "0.4.0"
+description = "KnowFlow agent glue (Kimi LLM adapter + KnowFlow tool runtime) built on the TitanX SDK"
 requires-python = ">=3.11"
+# The SDK is no longer vendored: this package depends on the TitanX source that
+# lives at the monorepo root, three levels up from titanx-agent/.
 dependencies = [
-    "fastapi>=0.111.0",
+    "titanx @ file:../../..",
     "uvicorn[standard]>=0.30.0",
-    "pydantic>=2.7.0",
-    "aiofiles>=23.2.1",
-    # storage
-    "asyncpg>=0.29.0",
-    "libsql-client>=0.3.0",
-    # sandbox
-    "wasmtime>=22.0.0",
-    "aiodocker>=0.21.0",
-    "e2b>=0.17.0",
-    # retrieval / embeddings (optional)
-    "numpy>=1.26.0",
 ]
 
 [project.optional-dependencies]
@@ -34,4 +25,4 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["titanx*"]
+include = ["knowflow_agent*"]

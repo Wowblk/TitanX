@@ -54,6 +54,10 @@ release = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# The SDK suite lives in tests/. apps/knowflow/** has its own suite that must be
+# run from its own directory (it needs knowflow_agent on sys.path), so keep the
+# root invocation from pulling it in.
+testpaths = ["tests"]
 
 [build-system]
 requires = ["setuptools>=69", "wheel"]
