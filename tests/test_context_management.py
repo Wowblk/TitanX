@@ -16,7 +16,7 @@ from titanx import (
 )
 from titanx.context import CompactionTracking, auto_compact_if_needed
 from titanx.context.manager import ContextManager
-from titanx.context.store import ContextStoreClosedError
+from titanx.context.store import ContextStore, ContextStoreClosedError
 from titanx.safety import SafetyLayer
 from titanx.state import create_config
 from titanx.types import (
@@ -127,6 +127,19 @@ async def test_closed_error_is_exported_and_legacy_catchable(tmp_path):
     await store.close()
     with pytest.raises(sqlite3.ProgrammingError):
         await store.archive("session", [UserMessage(role="user", content="x")])
+
+
+def test_context_store_base_declares_the_full_interface():
+    # §5.4: list_compactions/delete_session/close lived only on the concrete
+    # store, so the base interface could not be implemented or duck-typed
+    # against. The base must declare the whole contract the runtime and
+    # gateway teardown rely on.
+    required = {
+        "archive", "put_artifact", "read", "search", "commit_compaction",
+        "list_compactions", "save_task", "load_task", "delete_session", "close",
+    }
+    assert required <= set(dir(ContextStore))
+    assert required <= set(dir(SQLiteContextStore))
 
 
 async def test_cancelled_operation_does_not_wedge_store(tmp_path):
@@ -621,6 +634,62 @@ async def test_context_tool_cannot_select_session_or_request_unbounded_page(stor
     page = json.loads(result.output)
     assert len(page["content"]) == 100
     assert page["next_offset"] == 100
+
+
+def test_context_read_schema_max_matches_configured_read_max_chars(store):
+    # §5.4: the schema advertised ``maximum: 16000`` while execute silently
+    # clamped to ``read_max_chars`` (default 4000), so the advertised contract
+    # disagreed with the effective cap. The schema must reflect the real bound.
+    runtime, _ = runtime_with_store(
+        store, RecordingLlm([]),
+        context=ContextOptions(store, read_max_chars=1234),
+    )
+    definition = next(
+        tool for tool in runtime.config.available_tools if tool.name == "context_read"
+    )
+    assert definition.parameters["properties"]["limit"]["maximum"] == 1234
+
+
+async def test_runtime_context_read_uses_configured_cap_end_to_end(store):
+    # The runtime derives the context tool catalog twice — at construction and
+    # again when re-checking the contract before dispatch. If the second path
+    # used a different cap, every context_read would fail with
+    # tool_contract_changed. Drive a real call through the runtime to pin it.
+    output = "log row\n" * 2000 + "TAIL_VALUE=9182"
+
+    async def execute(name, params):
+        return ToolExecutionResult(output=output)
+
+    class RecallLlm(LlmAdapter):
+        def __init__(self):
+            self.calls = 0
+
+        async def respond(self, config, state):
+            self.calls += 1
+            if self.calls == 1:
+                return LlmTurnResult(type="tool_calls", tool_calls=[ToolCall("read-1", "logs", {})])
+            if self.calls == 2:
+                tm = next(m for m in state.messages if isinstance(m, ToolMessage))
+                return LlmTurnResult(type="tool_calls", tool_calls=[ToolCall("recall-1", "context_read", {
+                    "kind": "artifact", "id": tm.artifact_id, "limit": 1234,
+                })])
+            return LlmTurnResult(type="text", text="done")
+
+    tool = SingleTool(ToolDefinition("logs", "Read logs", {}), execute)
+    runtime, _ = runtime_with_store(
+        store, RecallLlm(), tools=tool,
+        context=ContextOptions(
+            store, offload_threshold_chars=1500, preview_chars=150, read_max_chars=1234,
+        ),
+    )
+    await runtime.run_prompt("recall the tail")
+
+    recall = next(
+        m for m in runtime.state.messages
+        if isinstance(m, ToolMessage) and m.tool_name == "context_read"
+    )
+    page = json.loads(recall.content)
+    assert page["next_offset"] == 1234  # the configured cap applies, not 16000
 
 
 async def test_offload_preserves_wrapper_and_only_archives_inspected_output(store):

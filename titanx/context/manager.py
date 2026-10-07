@@ -39,7 +39,14 @@ class ContextOptions:
             raise ValueError("context session_id must be a nonempty host-owned identifier")
 
 
-def context_tool_definitions() -> list[ToolDefinition]:
+def context_tool_definitions(*, read_max_chars: int = 4000) -> list[ToolDefinition]:
+    """Tool contracts for the context tools.
+
+    ``read_max_chars`` must be the effective ``ContextOptions.read_max_chars``
+    so ``context_read``'s advertised ``limit`` bound matches what ``execute``
+    actually applies (it clamps to that value). It defaults to the
+    ``ContextOptions`` default (4000) only for standalone use.
+    """
     return [
         ToolDefinition(
             name="context_read",
@@ -47,7 +54,7 @@ def context_tool_definitions() -> list[ToolDefinition]:
             parameters={"type": "object", "properties": {
                 "kind": {"type": "string", "enum": ["message", "artifact"]},
                 "id": {"type": "string"}, "offset": {"type": "integer", "minimum": 0},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 16000},
+                "limit": {"type": "integer", "minimum": 1, "maximum": read_max_chars},
             }, "required": ["kind", "id"], "additionalProperties": False},
             requires_sanitization=True,
         ),

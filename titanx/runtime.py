@@ -71,10 +71,13 @@ class AgentRuntime:
             from .context.manager import CONTEXT_TOOL_NAMES, context_tool_definitions
             if any(tool.name in CONTEXT_TOOL_NAMES for tool in available_tools):
                 raise ValueError("context_read and context_search are reserved when context management is enabled")
+            context_definitions = context_tool_definitions(
+                read_max_chars=context_options.read_max_chars
+            )
             injected_context_tools = [
-                definition.name for definition in context_tool_definitions()
+                definition.name for definition in context_definitions
             ]
-            available_tools.extend(context_tool_definitions())
+            available_tools.extend(context_definitions)
         self.config: AgentConfig = create_config(
             user_id=user_id,
             channel=channel,
@@ -1133,7 +1136,9 @@ class AgentRuntime:
             raise ExecutionAuthorizationError("tool_catalog_unavailable") from None
         if self._context_manager is not None:
             from .context.manager import context_tool_definitions
-            current.extend(context_tool_definitions())
+            current.extend(context_tool_definitions(
+                read_max_chars=self._context_manager.options.read_max_chars
+            ))
         return current
 
     async def _deny_execution_authorization(self, call: ToolCall, ordinal: int, reason: str) -> None:

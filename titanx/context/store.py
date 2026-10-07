@@ -39,6 +39,12 @@ class ContextStore:
     Existing message IDs are immutable: archiving an offloaded model view must
     never replace its original canonical message. All reads use an explicit
     host-provided session ID, never one supplied by a model tool argument.
+
+    This is the complete interface a host implements to back context
+    management. Lifecycle/cleanup operations (``list_compactions``,
+    ``delete_session``, ``close``) belong here too: the runtime's teardown
+    contract and the gateway's session eviction call them through this
+    interface, so a store that omits them cannot be driven correctly.
     """
 
     async def archive(self, session_id: str, messages: list[Message]) -> None:
@@ -56,10 +62,19 @@ class ContextStore:
     async def commit_compaction(self, session_id: str, originals: list[Message], replacement: list[Message], record: dict) -> None:
         raise NotImplementedError
 
+    async def list_compactions(self, session_id: str) -> list[dict]:
+        raise NotImplementedError
+
     async def save_task(self, session_id: str, task: TaskState) -> None:
         raise NotImplementedError
 
     async def load_task(self, session_id: str) -> TaskState | None:
+        raise NotImplementedError
+
+    async def delete_session(self, session_id: str) -> None:
+        raise NotImplementedError
+
+    async def close(self) -> None:
         raise NotImplementedError
 
 
