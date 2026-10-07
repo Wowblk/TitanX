@@ -50,6 +50,15 @@ always be flagged in the **Changed** / **Removed** sections.
   forwards it and `routes/chat.py` supplies the `POST /api/chat` body (or the
   first WS frame). The context is consulted only when the session is created, so
   a session's credentials cannot be swapped by a later request reusing the id.
+- **Caller-scoped gateway sessions** — `GatewayOptions.session_owner` takes a
+  host-supplied extractor mapping the decoded request body to a caller identity
+  (an authenticated user id, a tenant). When set, the gateway namespaces every
+  session key by it, so two callers presenting the same client-supplied
+  `sessionId` get *separate* sessions instead of sharing one runtime — closing
+  the hole where a reused `sessionId` exposed the creating caller's
+  `request_context` credentials (the KnowFlow agent wires it to its JWT-derived
+  `userId`). The identity must be host-trusted (server-derived); `None` keeps the
+  historical single-namespace behaviour.
 
 ### Changed
 

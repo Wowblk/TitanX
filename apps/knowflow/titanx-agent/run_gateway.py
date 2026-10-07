@@ -91,9 +91,25 @@ def make_runtime(
     )
 
 
+def session_owner(body: dict) -> str | None:
+    """Namespace sessions by the authenticated user id.
+
+    ``sessionId`` is client-supplied (the frontend mints ``knowflow-agent-<ts>``
+    per page load) and the Java caller forwards it verbatim, so without this a
+    caller could present another user's id and reuse that user's runtime —
+    including the ``toolBearerToken`` bound to it at creation. The Java layer
+    sets ``userId`` from the validated JWT, never from client input, so it is a
+    trustworthy scope. ``None`` (no user id on the body) falls back to the
+    unscoped id.
+    """
+    value = body.get("userId")
+    return str(value) if value else None
+
+
 options = GatewayOptions(
     port=3000,
     create_runtime=make_runtime,
+    session_owner=session_owner,
 )
 
 app = create_gateway(options)
