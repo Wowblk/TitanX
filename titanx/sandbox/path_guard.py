@@ -729,18 +729,80 @@ _CURL_REMOTE_NAME_LONGS = frozenset({
     "remote-name", "remote-name-all", "remote-header-name",
 })
 _WGET_SPIDER_LONGS = frozenset({"spider"})
+# The option that names the downloaded file / its destination directory.
+_WGET_OUTPUT_LONGS = frozenset({"output-document"})
+_WGET_DIR_LONGS = frozenset({"directory-prefix"})
+
+# Best-effort sets of the long options that consume a following argument, so
+# the option scan can skip a value that merely *looks* like a flag
+# (`curl -d -O` passes `-O` as POST data). Incomplete by design: an
+# unrecognised long option is assumed not to consume, which can only cause an
+# over-refusal, never a missed write.
+_CURL_VALUE_LONGS = frozenset({
+    "data", "data-binary", "data-raw", "data-urlencode", "form",
+    "form-string", "header", "user", "user-agent", "url", "request",
+    "output", "output-dir", "cookie", "cookie-jar", "proxy", "referer",
+    "upload-file", "interface", "cert", "key", "cacert", "capath", "config",
+    "dump-header", "write-out", "connect-timeout", "max-time", "retry",
+    "retry-delay", "retry-max-time", "range", "limit-rate", "resolve",
+    "oauth2-bearer",
+})
+_WGET_VALUE_LONGS = frozenset({
+    "output-document", "output-file", "directory-prefix", "user-agent",
+    "header", "post-data", "post-file", "body-data", "body-file", "user",
+    "password", "referer", "input-file", "tries", "timeout", "waitretry",
+    "limit-rate", "bind-address", "ca-certificate", "certificate",
+    "private-key", "execute", "load-cookies", "save-cookies", "warc-file",
+    "include-directories", "exclude-directories",
+})
 
 
-def _has_short(tokens: list[str], letter: str, value_shorts: frozenset[str]) -> bool:
+def _iter_option_positions(
+    tokens: list[str], value_shorts: frozenset[str], value_longs: frozenset[str],
+):
+    """Yield the tokens that sit in option position.
+
+    A token that is the *argument* of a preceding value-taking option is
+    skipped, so ``curl -d -O`` does not read the ``-O`` (it is POST data).
+    Values of a short option are located via ``value_shorts``; a long option
+    consumes a separate argument only when it resolves to a known
+    ``value_longs`` entry.
+    """
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        yield tok
+        consumes_next = False
+        split = _split_long(tok)
+        if split is not None:
+            if split[1] is None:
+                consumes_next = _abbrev(split[0], value_longs)[0] is not None
+        elif tok.startswith("-") and len(tok) > 1:
+            body = tok[1:]
+            for k, ch in enumerate(body):
+                if ch in value_shorts:
+                    consumes_next = k == len(body) - 1
+                    break
+        i += 2 if consumes_next else 1
+
+
+def _has_short(
+    tokens: list[str], letter: str, value_shorts: frozenset[str],
+    value_longs: frozenset[str],
+) -> bool:
     """True if short option ``letter`` appears (fused, bundled, or separate)."""
     return any(
-        _cluster_value(tok, letter, value_shorts)[0] for tok in tokens[1:]
+        _cluster_value(tok, letter, value_shorts)[0]
+        for tok in _iter_option_positions(tokens, value_shorts, value_longs)
     )
 
 
-def _has_long(tokens: list[str], names: frozenset[str]) -> bool:
+def _has_long(
+    tokens: list[str], names: frozenset[str], value_shorts: frozenset[str],
+    value_longs: frozenset[str],
+) -> bool:
     """True if any long option in ``names`` appears, abbreviation-aware."""
-    for tok in tokens[1:]:
+    for tok in _iter_option_positions(tokens, value_shorts, value_longs):
         split = _split_long(tok)
         if split is not None and _abbrev(split[0], names)[0] is not None:
             return True
@@ -804,15 +866,29 @@ def _h_wget(tokens: list[str], *, cwd: str | None):
         if refuse:
             return [], refuse
         targets.extend(extra)
-    # Without `-O`, wget writes the server-chosen name into the destination
-    # directory — unnamed, so refuse (unless it only spiders).
+    # Without `-O` (or a `-P` destination the write is confined to), wget
+    # writes the server-chosen name into the sandbox cwd — unnamed, so
+    # refuse. `-o` (a separate log file) does NOT name the download.
+    named = _has_short(
+        tokens, "O", _WGET_VALUE_SHORTS, _WGET_VALUE_LONGS
+    ) or _has_long(
+        tokens, _WGET_OUTPUT_LONGS, _WGET_VALUE_SHORTS, _WGET_VALUE_LONGS
+    )
+    confined = _has_short(
+        tokens, "P", _WGET_VALUE_SHORTS, _WGET_VALUE_LONGS
+    ) or _has_long(
+        tokens, _WGET_DIR_LONGS, _WGET_VALUE_SHORTS, _WGET_VALUE_LONGS
+    )
+    spider = _has_long(
+        tokens, _WGET_SPIDER_LONGS, _WGET_VALUE_SHORTS, _WGET_VALUE_LONGS
+    )
     has_operand = any(not t.startswith("-") for t in tokens[1:])
-    if not targets and not _has_long(tokens, _WGET_SPIDER_LONGS) and has_operand:
+    if not named and not confined and not spider and has_operand:
         return [], (
             "wget downloads to a remote-derived filename that cannot be "
             "statically named — refusing"
         )
-    return targets, None
+    return list(dict.fromkeys(targets)), None
 
 
 def _h_curl(tokens: list[str], *, cwd: str | None):
@@ -823,10 +899,15 @@ def _h_curl(tokens: list[str], *, cwd: str | None):
     if refuse:
         return [], refuse
     # `-O`/`--remote-name[(-all)]`/`-J`/`--remote-header-name` write the
-    # server-chosen filename — unnamed, so refuse.
-    if _has_short(tokens, "O", _CURL_VALUE_SHORTS) or _has_short(
-        tokens, "J", _CURL_VALUE_SHORTS
-    ) or _has_long(tokens, _CURL_REMOTE_NAME_LONGS):
+    # server-chosen filename — unnamed, so refuse. The scan skips values of
+    # preceding value-taking options (`curl -d -O` passes `-O` as data).
+    if _has_short(
+        tokens, "O", _CURL_VALUE_SHORTS, _CURL_VALUE_LONGS
+    ) or _has_short(
+        tokens, "J", _CURL_VALUE_SHORTS, _CURL_VALUE_LONGS
+    ) or _has_long(
+        tokens, _CURL_REMOTE_NAME_LONGS, _CURL_VALUE_SHORTS, _CURL_VALUE_LONGS
+    ):
         return [], (
             "curl writes to a remote-derived filename that cannot be "
             "statically named — refusing"
@@ -838,7 +919,7 @@ def _h_curl(tokens: list[str], *, cwd: str | None):
     )
     if refuse:
         return [], refuse
-    return [*targets, *dir_targets], None
+    return list(dict.fromkeys([*targets, *dir_targets])), None
 
 
 def _h_tar(tokens: list[str], *, cwd: str | None):

