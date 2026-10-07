@@ -5,11 +5,11 @@ Hardened against the historical issues:
 1. ``hmac.compare_digest`` instead of ``==`` for the API-key check —
    string equality leaks timing information that lets an attacker
    recover the key one byte at a time over the network.
-2. Explicit auth dependency injected into HTTP routers AND the
-   WebSocket handler. Starlette's ``@app.middleware("http")`` does not
-   run on WS upgrades, so relying on a single HTTP middleware leaves
-   ``/api/chat/ws/{id}`` completely unauthenticated. The dependency
-   approach unifies both code paths.
+2. HTTP auth runs as ``@app.middleware("http")``; the WebSocket handler
+   in ``routes/chat.py`` calls the same ``_check_api_key`` inline.
+   Starlette's ``@app.middleware("http")`` does not run on WS upgrades,
+   so relying on the middleware alone would leave
+   ``/api/chat/ws/{id}`` completely unauthenticated.
 3. ``allow_origins`` is configurable. The default keeps ``["*"]`` for
    dev convenience but the docstring on ``GatewayOptions`` warns
    loudly. ``allow_credentials=False`` is implicit (we don't set it)
@@ -123,9 +123,9 @@ def create_gateway(options: GatewayOptions) -> FastAPI:
     async def http_auth_middleware(request: Request, call_next):
         # Note: this DOES NOT cover WebSocket connections — Starlette
         # routes WS handshakes through a separate code path that
-        # bypasses ``http`` middleware. The WS handler in chat.py
-        # performs its own ``_check_api_key`` call; do not remove that
-        # without first migrating it into a shared dependency.
+        # bypasses ``http`` middleware. The WS handler in chat.py calls
+        # the same ``_check_api_key`` inline; both paths share that one
+        # helper so they cannot drift apart.
         if options.api_key and request.url.path.startswith("/api/"):
             provided = request.headers.get("x-api-key")
             if not _check_api_key(provided, options.api_key):
