@@ -731,8 +731,6 @@ _CURL_REMOTE_NAME_LONGS = frozenset({
     "remote-name", "remote-name-all", "remote-header-name",
 })
 _WGET_SPIDER_LONGS = frozenset({"spider"})
-# The option that names the downloaded file / its destination directory.
-_WGET_OUTPUT_LONGS = frozenset({"output-document"})
 _WGET_DIR_LONGS = frozenset({"directory-prefix"})
 
 # Best-effort sets of the long options that consume a following argument, so
@@ -807,6 +805,26 @@ def _has_long(
     for tok in _iter_option_positions(tokens, value_shorts, value_longs):
         split = _split_long(tok)
         if split is not None and _abbrev(split[0], names)[0] is not None:
+            return True
+    return False
+
+
+def _has_long_resolving_to(
+    tokens: list[str], name: str, family: frozenset[str],
+    value_shorts: frozenset[str], value_longs: frozenset[str],
+) -> bool:
+    """True if some long option resolves *unambiguously* to ``name``.
+
+    ``family`` must hold every long option of the verb that shares a prefix
+    with ``name`` (plus ``name`` itself). Resolving against the whole family
+    means a genuinely ambiguous prefix matches nothing: wget's ``--output``
+    is a prefix of both ``--output-document`` and ``--output-file``, so it
+    does *not* name ``name`` — the caller must then fail closed rather than
+    treat the write as named.
+    """
+    for tok in _iter_option_positions(tokens, value_shorts, value_longs):
+        split = _split_long(tok)
+        if split is not None and _abbrev(split[0], family)[0] == name:
             return True
     return False
 
@@ -888,11 +906,15 @@ def _h_wget(tokens: list[str], *, cwd: str | None):
         targets.extend(extra)
     # Without `-O` (or a `-P` destination the write is confined to), wget
     # writes the server-chosen name into the sandbox cwd — unnamed, so
-    # refuse. `-o` (a separate log file) does NOT name the download.
+    # refuse. `-o` (a separate log file) does NOT name the download. An
+    # *ambiguous* long prefix (`--output`/`--out`) must resolve to nothing:
+    # treating it as `-O` would let an unnamed write pass, so it is resolved
+    # against the whole output family and thus counts as unnamed.
     named = _has_short(
         tokens, "O", _WGET_VALUE_SHORTS, _WGET_VALUE_LONGS
-    ) or _has_long(
-        tokens, _WGET_OUTPUT_LONGS, _WGET_VALUE_SHORTS, _WGET_VALUE_LONGS
+    ) or _has_long_resolving_to(
+        tokens, "output-document", _wget_out_longs,
+        _WGET_VALUE_SHORTS, _WGET_VALUE_LONGS,
     )
     confined = _has_short(
         tokens, "P", _WGET_VALUE_SHORTS, _WGET_VALUE_LONGS

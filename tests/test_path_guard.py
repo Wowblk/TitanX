@@ -523,3 +523,30 @@ class TestUnnamedWriteTargets:
         scan = scan_shell_write_targets("curl --output-dir - http://h/x", cwd="/work")
         assert scan.refuse_reason is None
         assert "/work/-" in scan.targets
+
+    @pytest.mark.parametrize("command", [
+        # `--output` (and every shorter `out…` prefix) is a prefix of BOTH
+        # `--output-document` and `--output-file`, so it is genuinely
+        # ambiguous — it does not name the download. An earlier pass resolved
+        # it to `--output-document` (a singleton set cannot see the
+        # ambiguity), reported the write as "named", recorded no target, and
+        # let an unnamed remote-derived download pass with empty targets.
+        "wget --output /etc/x http://h/x",
+        "wget --out /etc/x http://h/x",
+        "wget --output- /etc/x http://h/x",
+        "wget --output= http://h/x",
+    ])
+    def test_ambiguous_output_prefix_is_refused(self, command: str) -> None:
+        assert scan_shell_write_targets(command).refuse_reason is not None
+
+    @pytest.mark.parametrize("command,expected", [
+        # A *unique* abbreviation still names the download.
+        ("wget --output-doc /etc/x http://h/x", "/etc/x"),
+        ("wget --output-d /etc/x http://h/x", "/etc/x"),
+    ])
+    def test_unique_output_abbreviation_still_names(
+        self, command: str, expected: str
+    ) -> None:
+        scan = scan_shell_write_targets(command)
+        assert scan.refuse_reason is None
+        assert expected in scan.targets
