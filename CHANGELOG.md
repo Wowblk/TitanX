@@ -30,7 +30,12 @@ always be flagged in the **Changed** / **Removed** sections.
   registers `titanx-app = titanx.application:main` (the audit CLI remains
   `titanx`), and `create_demo_gateway(storage=, retriever=)` accepts optional
   backends so the `/api/memory`, `/api/jobs` and `/api/logs` routes are served
-  instead of always returning 501 (`docs/design-review-2026-10-07.md` problem #12).
+  instead of always returning 501. `server.run_gateway` is intentionally
+  **kept** as exported public API (the programmatic one-call launcher); the
+  `create_demo_gateway` default still builds with no backend so an unconfigured
+  host keeps its hermetic behavior, while `application.main --web` opens a
+  `LibSQLBackend` under the data dir so the shipped CLI serves those routes
+  without 501 (`docs/design-review-2026-10-07.md` problem #12).
 
 ### Changed
 

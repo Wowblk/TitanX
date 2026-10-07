@@ -78,6 +78,28 @@ def test_web_main_host_is_configurable(tmp_path, monkeypatch: pytest.MonkeyPatch
     assert captured["host"] == "0.0.0.0"
 
 
+def test_web_main_serves_memory_jobs_logs_not_501(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The shipped CLI should not advertise 501 on its own default: opening
+    # the gateway wires a LibSQLBackend under the data dir so the memory/
+    # jobs/logs routes are live without the host having to inject one.
+    captured: dict[str, object] = {}
+
+    def fake_run(app, host, port):  # noqa: ANN001
+        captured.update(host=host, port=port)
+        with TestClient(app) as client:
+            captured["jobs"] = client.get("/api/jobs").status_code
+            captured["logs"] = client.get("/api/logs").status_code
+            captured["memory"] = client.get(
+                "/api/memory", params={"sessionId": "s"}
+            ).status_code
+
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+    assert main(["--web", "--data-dir", str(tmp_path), "--port", "4321"]) == 0
+    assert captured["jobs"] == 200
+    assert captured["logs"] == 200
+    assert captured["memory"] == 200
+
+
 class _RecordingRetriever:
     """Injected retrieval boundary double; records the query it receives."""
 

@@ -409,7 +409,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         llm = None if args.check_context else select_llm()
         if args.web:
             import uvicorn
-            app = create_demo_gateway(args.data_dir, port=args.port, llm=llm)
+            from .storage import LibSQLBackend
+            # The shipped CLI should serve the memory/jobs/logs routes rather
+            # than advertise 501. Open a local LibSQL store under the data dir
+            # and hand it to the gateway; ``create_demo_gateway``'s own default
+            # stays backend-free (and hermetic) for callers that want that.
+            args.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            storage = LibSQLBackend(f"file:{args.data_dir / 'titanx.sqlite'}")
+            asyncio.run(storage.initialize())
+            app = create_demo_gateway(
+                args.data_dir, port=args.port, llm=llm, storage=storage
+            )
             print(f"网页：http://{args.host}:{args.port}")
             uvicorn.run(app, host=args.host, port=args.port)
             return 0

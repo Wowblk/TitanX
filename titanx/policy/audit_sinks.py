@@ -73,6 +73,14 @@ def storage_secondary_sink(
         # the execution fields stay indexable. Canonical top-level
         # fields win on any key collision with ``details``; the nested
         # ``details`` mapping is retained unchanged for compatibility.
+        #
+        # ``schema`` is stamped from the module default rather than the
+        # owning ``AuditLog``'s configured ``schema_version``: the sink
+        # boundary receives only the entry, not the log. A host that
+        # overrides ``AuditLog(schema_version=...)`` would therefore see
+        # the JSONL and this mirrored row disagree; treat the module
+        # constant as authoritative for mirrored rows until the sink
+        # interface carries the version through.
         record = {"schema": AUDIT_SCHEMA_VERSION, **asdict(entry)}
         data = {**entry.details, **record}
         await storage.save_log(
