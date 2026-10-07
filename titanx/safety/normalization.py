@@ -48,6 +48,12 @@ _HOMOGLYPH_TO_ASCII: dict[str, str] = {
 _INVISIBLE_CHARS = frozenset({
     "\u0000",  # NULL
     "\u00ad",  # SOFT HYPHEN
+    "\u034f",  # COMBINING GRAPHEME JOINER
+    "\u061c",  # ARABIC LETTER MARK
+    "\u115f",  # HANGUL CHOSEONG FILLER
+    "\u1160",  # HANGUL JUNGSEONG FILLER
+    "\u17b4",  # KHMER VOWEL INHERENT AQ
+    "\u17b5",  # KHMER VOWEL INHERENT AA
     "\u180e",  # MONGOLIAN VOWEL SEPARATOR
     "\u200b",  # ZERO WIDTH SPACE
     "\u200c",  # ZERO WIDTH NON-JOINER
@@ -64,12 +70,36 @@ _INVISIBLE_CHARS = frozenset({
     "\u2062",  # INVISIBLE TIMES
     "\u2063",  # INVISIBLE SEPARATOR
     "\u2064",  # INVISIBLE PLUS
+    "\u2065",  # unassigned (reserved invisible)
     "\u2066",  # LRI
     "\u2067",  # RLI
     "\u2068",  # FSI
     "\u2069",  # PDI
+    "\u3164",  # HANGUL FILLER
+    "\uffa0",  # HALFWIDTH HANGUL FILLER
     "\ufeff",  # ZW NO-BREAK SPACE / BOM
 })
+
+
+def _is_invisible(ch: str) -> bool:
+    """True for characters that render as nothing and can only be abuse.
+
+    The curated set above covers the common cases, but two whole Unicode
+    *ranges* are equally invisible and just as effective at splitting a
+    trigger word: the tag block (``U+E0001`` and ``U+E0020``–``U+E007F``,
+    used for language tagging and to hide text from renderers) and the
+    variation-selector blocks (``U+FE00``–``U+FE0F`` and
+    ``U+E0100``–``U+E01EF``). Matching them by range means the fix cannot
+    be outrun by enumerating one more code point.
+    """
+    if ch in _INVISIBLE_CHARS:
+        return True
+    code = ord(ch)
+    return (
+        0xE0000 <= code <= 0xE007F
+        or 0xFE00 <= code <= 0xFE0F
+        or 0xE0100 <= code <= 0xE01EF
+    )
 
 
 def canonicalise_for_scan(text: str) -> str:
@@ -99,14 +129,31 @@ def canonicalise_for_scan(text: str) -> str:
     # to fold or strip. The fast path (no homoglyphs, no invisibles) is the
     # common case for legitimate input and stays allocation-free.
     needs_rewrite = any(
-        ch in _HOMOGLYPH_TO_ASCII or ch in _INVISIBLE_CHARS
+        ch in _HOMOGLYPH_TO_ASCII or _is_invisible(ch)
         for ch in normalised
     )
     if not needs_rewrite:
         return normalised
     out: list[str] = []
     for ch in normalised:
-        if ch in _INVISIBLE_CHARS:
+        if _is_invisible(ch):
             continue
         out.append(_HOMOGLYPH_TO_ASCII.get(ch, ch))
     return "".join(out)
+
+
+def strip_invisible_chars(text: str) -> str:
+    """Remove invisible / formatting characters, keeping everything else.
+
+    Unlike :func:`canonicalise_for_scan` this does **not** NFKC-normalise or
+    fold homoglyphs — it only drops characters that render as nothing. It
+    exists so pattern matchers that are not allowed to rewrite visible text
+    (notably the PII redactor, which returns text to the user) can still
+    match a token an attacker split with a zero-width byte, e.g.
+    ``victim@exa\\u200bmple.com``.
+    """
+    if not text:
+        return text
+    if not any(_is_invisible(ch) for ch in text):
+        return text
+    return "".join(ch for ch in text if not _is_invisible(ch))
