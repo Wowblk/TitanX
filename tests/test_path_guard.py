@@ -424,6 +424,13 @@ class TestUnnamedWriteTargets:
         "curl -sO http://h/evil.sh",
         "curl -J http://h/evil.sh",
         "curl -O --output-dir /etc http://h/x",
+        # `-q`/`-R` are boolean curl flags; a following `-O` is a real
+        # remote-name write and must not be swallowed as their argument.
+        "curl -q -O http://h/x",
+        "curl -q -J http://h/x",
+        "curl -q --remote-name http://h/x",
+        "curl -R -O http://h/x",
+        "curl -R --remote-header-name http://h/x",
         "wget http://h/evil.sh",
         "wget -q http://h/evil.sh",
         # wget's `-o` is a *log* file; it does not name the download, so the
@@ -440,6 +447,20 @@ class TestUnnamedWriteTargets:
     def test_curl_to_stdout_is_not_a_write(self) -> None:
         # curl with no `-o`/`-O` streams to stdout — nothing to check.
         assert scan_shell_write_targets("curl http://h/x").refuse_reason is None
+
+    @pytest.mark.parametrize("command", [
+        "curl -o - http://h/x",
+        "curl --output - http://h/x",
+        "wget -O - http://h/x",
+        "wget -qO- http://h/x",
+        "wget --output-document - http://h/x",
+    ])
+    def test_output_dash_is_stdout_not_a_file(self, command: str) -> None:
+        # `-o -` / `-O -` write to stdout; they must not be refused as an
+        # unresolvable path, nor recorded as a write target.
+        scan = scan_shell_write_targets(command)
+        assert scan.refuse_reason is None, f"{command!r} was refused"
+        assert scan.targets == []
 
     def test_wget_spider_is_not_a_write(self) -> None:
         assert scan_shell_write_targets("wget --spider http://h/x").refuse_reason is None

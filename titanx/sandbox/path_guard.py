@@ -718,9 +718,11 @@ def _h_sed(tokens: list[str], *, cwd: str | None):
 
 # Short options that take a *value* for each tool. Used by ``_cluster_value``
 # so a bundled cluster (`-so`, `-qO`) is parsed without mistaking a value
-# (``-xproxy``) for the option.
+# (``-xproxy``) for the option, and by the option-position walker. It must
+# list value-taking options ONLY: putting a boolean flag here (e.g. curl's
+# `-q`/`-R`) makes the walker swallow the *next* token, hiding a real `-O`.
 _WGET_VALUE_SHORTS = frozenset("OoaiPUetTw")
-_CURL_VALUE_SHORTS = frozenset("AbcdeEFHKmoPqrRTuUwxXyzY")
+_CURL_VALUE_SHORTS = frozenset("AbcdeEFHKmoPrTuUwxXyzY")
 
 # Options whose write target is a *remote-derived* filename (curl -O/-J,
 # wget's default). The name is chosen by the server, so it cannot be
@@ -839,7 +841,8 @@ def _output_target(
                     val = fused
                 elif j + 1 < len(tokens):
                     val, next_j = tokens[j + 1], j + 2
-        if val is not None:
+        if val is not None and val != "-":
+            # A lone `-` means stdout (`curl -o -`, `wget -O -`), not a file.
             resolved = _resolve_path(val, cwd=cwd)
             if resolved is None:
                 return [], f"{label} target {val!r} cannot be statically resolved"
