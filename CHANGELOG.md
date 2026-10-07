@@ -82,9 +82,30 @@ always be flagged in the **Changed** / **Removed** sections.
   the expiry timer, so disposing cannot leave elevated permissions live. It is
   idempotent and safe when no grant is active (`docs/design-review-2026-10-07.md`
   problem #14).
+- **Identity is documented as host-trusted binding, not authentication** — the
+  `(thread_id, session_id, user_id, channel)` tuple is read from the host-supplied
+  `AgentConfig`; `ExecutionGuard` uses it only to bind an approval to a run and
+  detect a mid-run change (`identity_changed`). `ExecutionGuard` and the
+  `AgentConfig` identity fields now state that hosts must authenticate the caller
+  and populate them from trusted state — the runtime never authenticates them
+  (`docs/design-review-2026-10-07.md` §1.6). No behaviour change.
+- **`ContextStore` declares its full interface** — `list_compactions`,
+  `delete_session` and `close` were only on `SQLiteContextStore`; they are now on
+  the base `ContextStore` too, since runtime teardown and gateway eviction call
+  them through the interface (`docs/design-review-2026-10-07.md` §5.4).
 
 ### Fixed
 
+- **MCP tool calls no longer serialize on the admission lock** —
+  `McpAdmissionRuntime.execute` held `self._lock` across `client.call_tool`, so a
+  slow (or hung-until-timeout) server stalled every other MCP tool on the same
+  runtime. The lock now guards only discovery/revalidation and the binding
+  lookup; the network round-trip runs outside it
+  (`docs/design-review-2026-10-07.md` §1.6).
+- **`context_read`'s advertised page bound matches its effective cap** — the tool
+  schema advertised `limit` `maximum: 16000` while `execute` silently clamped to
+  `ContextOptions.read_max_chars` (default 4000). The schema maximum is now
+  derived from the configured cap (`docs/design-review-2026-10-07.md` §5.4).
 - **Tool audit records carry identity, session and tool contract** —
   `ExecutionGuard.audit_details()` now emits `thread_id`, `session_id`,
   `user_id`, `channel` (from the operation-bound `ToolIntent.identity`) and the
