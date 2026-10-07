@@ -180,6 +180,60 @@ class PrivateAddressDecision:
     category: str = ""
 
 
+def _canonical_ipv4_literal(host: str) -> str | None:
+    """Return the canonical dotted-quad for a permissive IPv4 literal.
+
+    ``ipaddress.ip_address`` only accepts the canonical dotted-quad, but
+    glibc's ``inet_aton`` (and therefore most HTTP clients and
+    resolvers) additionally accepts the historical forms an attacker
+    uses to reach a private destination while dodging a string check:
+
+    - a bare 32-bit integer          ``2130706433``       → 127.0.0.1
+    - hex                            ``0x7f000001``       → 127.0.0.1
+    - octal octets                   ``0177.0.0.1``       → 127.0.0.1
+    - 1–3 component short forms      ``127.1`` / ``127.0.1``
+
+    Returns the canonical form, or ``None`` when ``host`` is not a valid
+    32-bit IPv4 literal (e.g. a real hostname, or an integer ≥ 2**32).
+    """
+    parts = host.split(".")
+    if not 1 <= len(parts) <= 4:
+        return None
+
+    def _field(text: str) -> int | None:
+        if not text:
+            return None
+        if text[:2].lower() == "0x":
+            digits, base = text[2:], 16
+        elif len(text) > 1 and text[0] == "0":
+            digits, base = text, 8
+        else:
+            digits, base = text, 10
+        if not digits:
+            return None
+        try:
+            return int(digits, base)
+        except ValueError:
+            return None
+
+    values: list[int] = []
+    for part in parts:
+        value = _field(part)
+        if value is None:
+            return None
+        values.append(value)
+
+    # inet_aton field widths: every component but the last is one byte;
+    # the last absorbs the remaining bytes (4 - (n-1)).
+    widths = [1] * (len(values) - 1) + [4 - (len(values) - 1)]
+    total = 0
+    for value, width in zip(values, widths):
+        if value < 0 or value >= (1 << (8 * width)):
+            return None
+        total = (total << (8 * width)) | value
+    return ".".join(str((total >> shift) & 0xFF) for shift in (24, 16, 8, 0))
+
+
 def _classify_address(host: str) -> PrivateAddressDecision:
     """Return a deny decision if ``host`` resolves to a private/reserved IP.
 
@@ -192,7 +246,8 @@ def _classify_address(host: str) -> PrivateAddressDecision:
     blocking is at the socket layer, which the SDK does not own.
     What we *can* do here is reject the easy cases:
 
-    - The request URL contains a literal IP. We classify it directly.
+    - The request URL contains a literal IP. We classify it directly,
+      after normalising the alternate encodings ``inet_aton`` accepts.
     - The hostname itself looks like a metadata sentinel. We refuse it
       even though we don't know the resolution result.
 
@@ -210,6 +265,13 @@ def _classify_address(host: str) -> PrivateAddressDecision:
     if lowered.startswith("[") and lowered.endswith("]"):
         lowered = lowered[1:-1]
 
+    # A single trailing dot is the DNS root label; ``metadata.google.
+    # internal.`` and ``metadata.google.internal`` name the same host.
+    # Dropping it stops the sentinel list and the IP parser from being
+    # side-stepped by the trailing-dot spelling.
+    if lowered.endswith("."):
+        lowered = lowered[:-1]
+
     if lowered in _DEFAULT_METADATA_HOSTNAMES:
         return PrivateAddressDecision(
             blocked=True,
@@ -217,14 +279,20 @@ def _classify_address(host: str) -> PrivateAddressDecision:
             category="metadata_host",
         )
 
-    # Try literal IP. If it parses, classify. If not, fall through —
-    # we deliberately do not resolve. Note ``ip_address`` raises on
-    # leading zeros in v4 octets which is fine; "010.0.0.1" is not a
-    # canonical address and modern resolvers reject it.
+    # Try literal IP. Canonical form first; if that fails, normalise the
+    # alternate encodings (integer / hex / octal / short) that resolvers
+    # accept. Anything else falls through — we deliberately do not DNS
+    # resolve.
     try:
         addr = ipaddress.ip_address(lowered)
     except ValueError:
-        return PrivateAddressDecision(blocked=False)
+        canonical = _canonical_ipv4_literal(lowered)
+        if canonical is None:
+            return PrivateAddressDecision(blocked=False)
+        try:
+            addr = ipaddress.ip_address(canonical)
+        except ValueError:
+            return PrivateAddressDecision(blocked=False)
 
     if addr.is_loopback:
         return PrivateAddressDecision(
@@ -660,9 +728,10 @@ class EgressGuard:
         if decision.blocked:
             return decision
         # Operator-extended sentinel list. We compare on the lowered
-        # host (no port) which the caller already produced.
-        extras = {h.lower() for h in self._policy.extra_blocked_hostnames}
-        if host.lower() in extras:
+        # host (no port) which the caller already produced, dropping a
+        # single trailing dot so ``host.`` and ``host`` are equivalent.
+        extras = {h.lower().rstrip(".") for h in self._policy.extra_blocked_hostnames}
+        if host.lower().rstrip(".") in extras:
             return PrivateAddressDecision(
                 blocked=True,
                 reason=f"refusing operator-blocked host {host!r}",
