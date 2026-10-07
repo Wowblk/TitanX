@@ -118,6 +118,11 @@ def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter
                 session_id,
                 options.create_runtime,
                 hooks,
+                # The decoded request body is the only place a host can get
+                # per-request credentials (bearer token, end-user id) at the
+                # moment the runtime is built. Consumed only by factories
+                # that declare a third parameter.
+                request_context=body,
             )
         except SessionCapacityError as exc:
             return JSONResponse({"error": str(exc)}, status_code=503)
@@ -273,6 +278,11 @@ def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter
                             session_id,
                             options.create_runtime,
                             hooks,
+                            # The first frame that creates the session is the
+                            # WS client's only chance to hand the factory its
+                            # credentials (a token, an end-user id), exactly as
+                            # the SSE route forwards its POST body.
+                            request_context=data,
                         )
                     except SessionCapacityError as exc:
                         await websocket.send_json({

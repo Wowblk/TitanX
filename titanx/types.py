@@ -16,6 +16,18 @@ class ToolDefinition:
     parameters: dict[str, Any]
     requires_approval: bool = False
     requires_sanitization: bool = False
+    # A ``return_direct`` tool short-circuits the loop: once its result is
+    # committed, the runtime ends the turn using that output as the final
+    # assistant message instead of asking the LLM for a second turn to
+    # summarise it. Use for tools whose result *is* the answer.
+    #
+    # The short-circuit applies only when the call is the batch's final one,
+    # its output is non-empty, and it did not error or get blocked by the
+    # output safety scan; otherwise the turn falls through to the LLM. The
+    # answer is the *inspected* content (post injection scan / PII redaction)
+    # and is presented as the assistant's own reply — it is not wrapped in the
+    # ``<tool_output>`` markers, since the tool author owns its presentation.
+    return_direct: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
     # A tool with ``mandatory_approval=True`` must never be satisfied by the
     # coarse ``auto_approve_tools`` host opt-in: every call still pauses for an

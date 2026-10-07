@@ -96,12 +96,13 @@ def make_runtime(
     tools: ToolRuntime | None = None,
     hooks: RuntimeHooks | None = None,
     wrap_tool_output: bool = False,
+    safety: SafetyLayer | None = None,
 ) -> AgentRuntime:
     runtime_tools = tools or NullTools()
     return AgentRuntime(
         llm=llm,
         tools=runtime_tools,
-        safety=SafetyLayer(),
+        safety=safety or SafetyLayer(),
         max_iterations=max_iterations,
         hooks=hooks or RuntimeHooks(),
         wrap_tool_output=wrap_tool_output,

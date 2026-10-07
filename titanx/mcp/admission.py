@@ -996,6 +996,7 @@ class McpAdmissionRuntime(ToolRuntime):
                 ),
                 requires_approval=definition.requires_approval,
                 requires_sanitization=definition.requires_sanitization,
+                return_direct=definition.return_direct,
                 mandatory_approval=definition.mandatory_approval,
                 metadata=_normalize_json_value(
                     definition.metadata,
