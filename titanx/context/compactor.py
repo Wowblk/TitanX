@@ -11,19 +11,11 @@ from .tokens import estimate_input_tokens
 from .tasks import model_messages
 from .store import ContextStore
 from .summary import StructuredSummary, SummaryValidationError
+from .transcript import SUMMARY_PREFIX, Transcript, is_summary as _is_summary
 from .types import CompactionOptions, CompactionResult, CompactionStrategy, CompactionTracking
 
 PTL_TRIM_RATIO = 0.2
-SUMMARY_PREFIX = "[Conversation summary so far]\n"
 BlockedReason = Literal["context_budget_exceeded", "token_estimation_failed", "context_storage_failed"]
-
-
-def _is_summary(message: Message) -> bool:
-    if not isinstance(message, SystemMessage):
-        return False
-    return message.is_summary is True or (
-        message.is_summary is None and message.content.startswith(SUMMARY_PREFIX)
-    )
 
 
 def _message_groups(messages: list[Message]) -> list[list[Message]]:
@@ -100,6 +92,7 @@ async def auto_compact_if_needed(
     config: AgentConfig | None = None,
     store: ContextStore | None = None,
     store_timeout_seconds: float = 10.0,
+    transcript: Transcript | None = None,
 ) -> CompactionOutcome:
     """Commit one replacement summary only after the rebuilt input fits.
 
@@ -218,7 +211,7 @@ async def auto_compact_if_needed(
                         ), timeout=store_timeout_seconds)
                     except Exception:
                         return failure("context_storage_failed")
-                state.messages = rebuilt
+                (transcript or Transcript(config)).replace(state, rebuilt, reason="compaction")
                 state.needs_compaction = False
                 # Usage fields remain the actual past provider counts.
                 return CompactionOutcome(

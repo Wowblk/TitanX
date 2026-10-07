@@ -9,6 +9,7 @@ from html import escape
 from ..types import AgentConfig, AgentState, ContextOffloadedEvent, ToolDefinition, ToolExecutionResult, ToolMessage
 from .store import ContextStore
 from .tasks import model_messages
+from .transcript import Transcript
 
 CONTEXT_TOOL_NAMES = frozenset({"context_read", "context_search"})
 
@@ -64,9 +65,12 @@ def context_tool_definitions() -> list[ToolDefinition]:
 
 
 class ContextManager:
-    def __init__(self, options: ContextOptions, config: AgentConfig):
+    def __init__(self, options: ContextOptions, config: AgentConfig, *, transcript: Transcript | None = None):
         self.options = options
         self.config = config
+        # The runtime threads one owner in; standalone construction (tests,
+        # embedding) still routes the commit through a private owner.
+        self._transcript = transcript or Transcript(config)
 
     async def _wait(self, awaitable):
         return await asyncio.wait_for(awaitable, self.options.storage_timeout_seconds)
@@ -105,7 +109,7 @@ class ContextManager:
             rebuilt.append(replace(message, content=content, artifact_id=artifact_id))
             events.append(ContextOffloadedEvent(message.id, artifact_id, len(message.content), len(content)))
         if events:
-            state.messages = rebuilt
+            self._transcript.replace(state, rebuilt, reason="offload")
         return events
 
     async def execute(self, name: str, params: dict) -> ToolExecutionResult:

@@ -119,6 +119,46 @@ def test_single_prompt_cli_returns_failure_when_context_is_blocked(tmp_path, cap
     assert (tmp_path / "context.sqlite").is_file()
 
 
+def test_gateway_shutdown_tears_down_every_session():
+    from titanx.gateway import GatewayOptions, create_gateway
+
+    torn_down = []
+
+    class _RecordingRuntime:
+        async def run_prompt(self, message, *, hooks=None):
+            return None
+
+        async def aclose(self):
+            torn_down.append(self)
+
+    def create_runtime(_session_id, _hooks):
+        return _RecordingRuntime()
+
+    app = create_gateway(GatewayOptions(create_runtime=create_runtime))
+    with TestClient(app) as client:
+        for session_id in ("s1", "s2"):
+            response = client.post("/api/chat", json={"sessionId": session_id, "message": "hi"})
+            assert response.status_code == 200
+
+    assert len(torn_down) == 2
+
+
+async def test_runtime_aclose_removes_session_rows_and_is_idempotent(tmp_path):
+    application = DemoApplication(tmp_path)
+    runtime = application.create_runtime()
+    try:
+        await runtime.run_prompt("remember this exact phrase")
+        session_id = runtime.config.session_id
+        assert await application.store.search(session_id, "exact phrase")
+
+        await runtime.aclose()
+        # The per-session rows are gone, then a second call must be a no-op.
+        assert await application.store.search(session_id, "exact phrase") == []
+        await runtime.aclose()
+    finally:
+        await application.close()
+
+
 def test_unified_and_legacy_help_have_no_storage_side_effects(tmp_path):
     project = Path(__file__).resolve().parents[1]
     for entry in ("run.py", "demo.py", "run_gateway.py", "demo_context.py"):
