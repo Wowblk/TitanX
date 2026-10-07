@@ -23,6 +23,16 @@ class ContentPage:
     total_chars: int
 
 
+class ContextStoreClosedError(sqlite3.ProgrammingError):
+    """Raised when an operation targets a store that has been closed.
+
+    Subclasses ``sqlite3.ProgrammingError`` (with a matching message) so hosts
+    that already catch the underlying driver error keep working, while callers
+    that want to distinguish "the store is shutting down" from a genuine schema
+    error can catch this type instead.
+    """
+
+
 class ContextStore:
     """Implementations must commit writes before returning and isolate sessions.
 
@@ -59,11 +69,21 @@ class SQLiteContextStore(ContextStore):
     SQLite operations run off the event loop. A threading lock keeps a cancelled
     caller's still-finishing worker serialized with later calls. Each write is
     transactional and idempotent; cancellation never commits a partial batch.
-    Own and close this store at host/application scope, not once per runtime.
+    The lock is always released when the worker returns, so a cancelled or
+    timed-out caller cannot wedge the store. ``close`` is idempotent and, once
+    it has run, every later operation fails fast with ``ContextStoreClosedError``
+    (a ``sqlite3.ProgrammingError`` subclass) instead of touching a closed
+    connection. Own and close this store at host/application scope, not once per
+    runtime.
     """
+
+    # Mirrors sqlite3's own message so existing ``sqlite3.ProgrammingError``
+    # handlers keep matching while callers can catch ContextStoreClosedError.
+    _CLOSED_MESSAGE = "Cannot operate on a closed database."
 
     def __init__(self, path: str | Path) -> None:
         self._lock = threading.RLock()
+        self._closed = False
         if str(path) != ":memory:":
             # New transcript files are private to the host account. Do not
             # silently change permissions on an existing application database.
@@ -94,9 +114,18 @@ class SQLiteContextStore(ContextStore):
         """)
 
     async def _run(self, fn):
+        if self._closed:
+            raise ContextStoreClosedError(self._CLOSED_MESSAGE)
         def transaction():
-            with self._lock, self._conn:
-                return fn(self._conn)
+            with self._lock:
+                # Re-check under the lock so a worker that was queued before
+                # close() and resumes after it cannot fall through onto a
+                # closed connection (surfacing a raw driver error instead of a
+                # consistent, catchable signal).
+                if self._closed:
+                    raise ContextStoreClosedError(self._CLOSED_MESSAGE)
+                with self._conn:
+                    return fn(self._conn)
         return await asyncio.to_thread(transaction)
 
     @staticmethod
@@ -174,7 +203,14 @@ class SQLiteContextStore(ContextStore):
         await self._run(delete)
 
     async def close(self) -> None:
+        if self._closed:
+            return
         def close():
             with self._lock:
+                # Idempotent under concurrency: whichever worker gets the lock
+                # first closes once; the rest observe the flag and return.
+                if self._closed:
+                    return
+                self._closed = True
                 self._conn.close()
         await asyncio.to_thread(close)

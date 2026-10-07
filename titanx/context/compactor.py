@@ -7,7 +7,6 @@ from time import monotonic
 from typing import Literal
 
 from ..types import AgentConfig, AgentState, AssistantMessage, Message, SystemMessage, ToolMessage
-from .tokens import estimate_input_tokens
 from .tasks import model_messages
 from .store import ContextStore
 from .summary import StructuredSummary, SummaryValidationError
@@ -46,12 +45,14 @@ def _split_pinned_tail(messages: list[Message], *, min_recent: int) -> tuple[lis
     return _flatten(groups[:cut]), _flatten(groups[cut:])
 
 
-def _drop_largest(eligible: list[Message]) -> list[Message]:
+def _drop_largest(eligible: list[Message], estimate) -> list[Message]:
     groups = _message_groups(eligible)
     if not groups:
         return []
-    # Include call arguments, not only content. Never orphan a tool result.
-    biggest = max(range(len(groups)), key=lambda i: estimate_input_tokens(None, groups[i]))
+    # Victim selection must use the same configured tokenizer that gates the
+    # budget, otherwise a custom estimator can rank a different group as the
+    # most expensive one. Never orphan a tool result.
+    biggest = max(range(len(groups)), key=lambda i: estimate(groups[i]))
     return _flatten([group for i, group in enumerate(groups) if i != biggest])
 
 
@@ -76,8 +77,9 @@ class CompactionOutcome:
 
 
 def _estimate(config: AgentConfig | None, messages: list[Message], options: CompactionOptions) -> int:
-    # Host callbacks receive a detached request view, like the summarizer.
-    count = options.token_estimator(deepcopy(config), deepcopy(messages))
+    # Messages are detached so a mutating host callback cannot corrupt history;
+    # config is frozen, so it needs no copy.
+    count = options.token_estimator(config, deepcopy(messages))
     if isinstance(count, bool) or not isinstance(count, int) or count < 0:
         raise ValueError("token_estimator must return a nonnegative integer")
     return count
@@ -225,7 +227,10 @@ async def auto_compact_if_needed(
 
         if ptl_attempts == options.max_ptl_retries or not candidates:
             break
-        candidates = _drop_largest(candidates) if ptl_attempts == 0 else _trim_oldest(candidates)
+        try:
+            candidates = _drop_largest(candidates, estimate) if ptl_attempts == 0 else _trim_oldest(candidates)
+        except Exception:
+            return failure("token_estimation_failed")
         if not candidates and not summaries:
             break
     return failure()

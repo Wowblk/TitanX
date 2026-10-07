@@ -148,7 +148,6 @@ class AgentRuntime:
         self._context_completion_pending = False
         self._closed = False
 
-        self._approval_event: asyncio.Event = asyncio.Event()
         # ``reject_pending_tool`` intentionally stays synchronous for host/UI
         # compatibility. Its ToolMessage is committed immediately, while the
         # audit + RuntimeEvent side effects are queued here and flushed at the
@@ -374,7 +373,6 @@ class AgentRuntime:
         set_pending_approval(self.state, None)
         self.state.signal = "continue"
         self.state.last_response_type = "none"
-        self._approval_event.set()
 
     def reject_pending_tool(self, reason: str = "Rejected by host") -> None:
         """Reject the currently pending tool call.
@@ -417,35 +415,11 @@ class AgentRuntime:
         set_pending_approval(self.state, None)
         self.state.signal = "continue"
         self.state.last_response_type = "none"
-        self._approval_event.set()
 
     def revoke_tool_approval(self, execution_id: str) -> None:
         """Revoke a granted operation before admission; never undo a side effect."""
         call_id = self._execution_guard.revoke_approval(execution_id)
         self.state.approved_tool_call_ids.discard(call_id)
-
-    async def wait_for_approval(self, timeout: float | None = None) -> bool:
-        """Block until the current pending approval is resolved.
-
-        Useful for callers that want to coordinate UI workflows
-        asynchronously (e.g. a FastAPI WebSocket handler that pushes the
-        approval prompt to a browser and awaits the human decision)
-        without polling ``state.pending_approval`` on a timer.
-
-        Returns ``True`` when an approval is resolved (approve or reject) —
-        or when there is nothing to wait for in the first place — and
-        ``False`` if ``timeout`` elapsed before resolution.
-        """
-        if self.state.pending_approval is None:
-            return True
-        try:
-            if timeout is None:
-                await self._approval_event.wait()
-            else:
-                await asyncio.wait_for(self._approval_event.wait(), timeout)
-            return True
-        except asyncio.TimeoutError:
-            return False
 
     async def resume(self, *, hooks: RuntimeHooks | None = None) -> AgentState:
         # A resume invoked from an on_event callback inherits the active
@@ -461,10 +435,6 @@ class AgentRuntime:
     @property
     def _effective_max_iterations(self) -> int:
         return self._policy_store.get_policy().max_iterations
-
-    @property
-    def _effective_auto_approve(self) -> bool:
-        return self._policy_store.get_policy().auto_approve_tools
 
     async def _run_loop(self) -> AgentState:
         from .types import (
@@ -733,10 +703,6 @@ class AgentRuntime:
         self.state.pending_tool_calls = []
         self.state.pending_tool_call_index = 0
         self.state.last_response_type = "none"
-        # Release any host task waiting on the approval that cancellation just
-        # invalidated. The runtime signal remains ``interrupt`` and therefore
-        # cannot accidentally resume execution from this wake-up.
-        self._approval_event.set()
         return synthesised
 
     async def _audit_cancelled_tool_calls(self, tool_calls: list[ToolCall]) -> None:
@@ -948,11 +914,6 @@ class AgentRuntime:
                 state_approval = self._execution_guard.request_approval(intent)
                 event_approval = copy.deepcopy(state_approval)
                 set_pending_approval(self.state, state_approval)
-                # Reset the approval event so wait_for_approval() blocks until
-                # *this* approval is resolved by approve_/reject_pending_tool.
-                # Without clear() the event would stay set from any prior
-                # resolution and wait_for_approval() would return immediately.
-                self._approval_event.clear()
                 await self._emit(PendingApprovalEvent(
                     approval=event_approval,
                 ))

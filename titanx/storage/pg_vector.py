@@ -175,6 +175,13 @@ class PgVectorBackend(StorageBackend):
         return [self._row_to_job(r) for r in rows]
 
     async def save_log(self, timestamp: datetime, event: str, actor: str, session_id: str | None = None, data: Any = None) -> None:
+        """Deprecated: write audit records through ``AuditLog`` instead.
+
+        Kept for backward compatibility. Prefer the canonical pipeline in
+        ``titanx.policy.audit_log.AuditLog`` (fan out to this backend with
+        ``titanx.policy.audit_sinks.storage_secondary_sink``); writing here
+        directly produces a second, unreconciled audit stream (Q20).
+        """
         assert self._pool
         async with self._pool.acquire() as conn:
             await conn.execute(

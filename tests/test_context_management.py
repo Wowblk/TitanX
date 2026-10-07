@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from copy import deepcopy
 from dataclasses import replace
 
@@ -15,6 +16,7 @@ from titanx import (
 )
 from titanx.context import CompactionTracking, auto_compact_if_needed
 from titanx.context.manager import ContextManager
+from titanx.context.store import ContextStoreClosedError
 from titanx.safety import SafetyLayer
 from titanx.state import create_config
 from titanx.types import (
@@ -91,6 +93,60 @@ async def test_search_is_literal_paged_and_session_scoped(store):
     await store.delete_session("a")
     assert await store.search("a", "%_") == []
     assert len(await store.search("b", "%_")) == 1
+
+
+async def test_operation_after_close_raises_context_store_closed_error(tmp_path):
+    """A closed store fails fast with a typed, catchable error."""
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    message = UserMessage(role="user", content="after close")
+    await store.archive("session", [message])
+
+    await store.close()
+    await store.close()  # close is idempotent
+
+    with pytest.raises(ContextStoreClosedError):
+        await store.archive("session", [message])
+    with pytest.raises(ContextStoreClosedError):
+        await store.search("session", "after")
+
+
+async def test_closed_error_is_exported_and_legacy_catchable(tmp_path):
+    """The typed error is reachable from the package and keeps the old contract.
+
+    Hosts were told to catch ``ContextStoreClosedError``; that is only
+    actionable if it is importable, and it must remain a ``sqlite3.
+    ProgrammingError`` so existing handlers keyed on the driver error keep
+    matching.
+    """
+    from titanx import ContextStoreClosedError as Exported
+
+    assert Exported is ContextStoreClosedError
+    assert issubclass(ContextStoreClosedError, sqlite3.ProgrammingError)
+
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    await store.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        await store.archive("session", [UserMessage(role="user", content="x")])
+
+
+async def test_cancelled_operation_does_not_wedge_store(tmp_path):
+    """A cancelled/timed-out caller must leave the store usable and closeable."""
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    message = UserMessage(role="user", content="survives cancellation")
+
+    # Start the operation, let it reach the worker thread, then cancel the
+    # awaiting coroutine (the shape of a ContextManager._wait timeout).
+    task = asyncio.create_task(store.archive("session", [message]))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The store must not be wedged: later work still commits and is readable.
+    await store.archive("session", [message])
+    page = await store.read("session", "message", message.id)
+    assert json.loads(page.content)["content"] == message.content
+    await store.close()
 
 
 async def test_offload_and_model_recall_do_not_rerun_original_tool(store):

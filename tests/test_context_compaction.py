@@ -265,6 +265,46 @@ async def test_ptl_keeps_previous_summary_and_complete_tool_groups_on_every_retr
     assert_complete_tool_groups(state.messages)
 
 
+async def test_ptl_victim_selection_uses_configured_token_estimator():
+    """The PTL "largest group" must follow ``token_estimator``, not raw bytes.
+
+    A custom tokenizer can rank a small-byte group as the most expensive one.
+    The estimator below counts ``X`` markers, so the byte-small group is the
+    victim even though the byte estimator would drop the byte-large group.
+    """
+    class FlakyStrategy(CompactionStrategy):
+        def __init__(self):
+            self.inputs = []
+
+        async def summarize(self, messages):
+            self.inputs.append([m.content for m in messages])
+            if len(self.inputs) == 1:
+                raise RuntimeError("force PTL")
+            return "combined history"
+
+    def estimator(config, messages):
+        return sum(message.content.count("X") for message in messages)
+
+    byte_large = UserMessage(role="user", content="A" * 400)          # big bytes, 0 tokens
+    token_large = UserMessage(role="user", content="B" + "X" * 60)    # small bytes, 60 tokens
+    pinned = UserMessage(role="user", content="pinned tail")
+    # Independent confirmation that byte size ranks the opposite group largest.
+    assert estimate_input_tokens(None, [byte_large]) > estimate_input_tokens(None, [token_large])
+
+    state = AgentState(messages=[byte_large, token_large, pinned], needs_compaction=True)
+    strategy = FlakyStrategy()
+    options = CompactionOptions(1000, min_recent_messages=1, max_ptl_retries=1, token_estimator=estimator)
+
+    outcome = await auto_compact_if_needed(state, strategy, options, CompactionTracking())
+
+    assert outcome.was_compacted
+    assert outcome.result.ptl_attempts == 1
+    # The retained candidate set is the byte-large / token-cheap group.
+    assert strategy.inputs[1] == ["A" * 400]
+    assert token_large.id in outcome.result.omitted_message_ids
+    assert byte_large.id not in outcome.result.omitted_message_ids
+
+
 @pytest.mark.parametrize("large_field", ["system_prompt", "tool_description", "tool_parameters", "tool_arguments"])
 async def test_preflight_includes_system_prompt_tools_and_call_arguments(large_field):
     large = "context " * 500

@@ -31,7 +31,12 @@ dependencies = [
 ]
 
 [project.scripts]
+# ``titanx`` stays the operator audit CLI (non-breaking). The real
+# application (terminal by default, ``--web`` for the gateway) gets its
+# own console script so an installed package can reach it without
+# ``python run.py``.
 titanx = "titanx.cli:main"
+titanx-app = "titanx.application:main"
 
 [project.optional-dependencies]
 mcp = [

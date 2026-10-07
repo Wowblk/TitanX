@@ -45,6 +45,10 @@
 保留最近至少 6 条消息及完整工具组。主动提前压缩时摘要可能比待替换内容长；提交
 条件是重建请求符合目标预算，并非每次处理都必须缩短消息。
 
+以上数值均取自 `DemoApplication.create_runtime()`（`application.py`）的
+`CompactionOptions` 与 `ContextOptions`（`context/manager.py`）默认值；源代码
+是唯一事实来源，本节数值与其保持一致，如发生变动以代码为准。
+
 终端和网页通过 `create_sandboxed_runtime()` 保留默认沙箱接线。上下文校验也使用
 `DemoApplication.create_runtime()` 及相同上下文设置，但传入窄范围的合成日志工具
 和预设 adapter；该工具只在进程内生成文本，没有文件或网络操作。它验证上下文流程，

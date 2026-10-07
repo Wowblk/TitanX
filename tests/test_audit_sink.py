@@ -14,7 +14,7 @@ key invariants:
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -26,6 +26,7 @@ from titanx.policy import (
     PolicyStore,
     storage_secondary_sink,
 )
+from titanx.storage.types import StorageBackend
 
 
 class _CapturingStorage:
@@ -124,6 +125,72 @@ class TestSecondarySinkFanout:
         )
         assert len(captured) == 1
         assert captured[0].event == "policy_change"
+
+    async def test_secondary_payload_retains_the_full_execution_record(self) -> None:
+        # The canonical JSONL record carries every AuditEntry field. The
+        # secondary store must not be a lossy copy: promoting the
+        # execution/authorisation fields out of ``details`` keeps them
+        # queryable instead of buried inside a JSON blob (Q20).
+        storage = _CapturingStorage()
+        sink = storage_secondary_sink(storage, session_id="sid")
+
+        await sink(AuditEntry(
+            timestamp="2026-10-07T12:00:00+00:00",
+            event="tool_decision",
+            actor="host",
+            reason="approval required",
+            before=AgentPolicy(allowed_write_paths=["/a"]),
+            after=AgentPolicy(allowed_write_paths=["/b"]),
+            snapshot_id="snap-1",
+            tool_name="mcp__github__search",
+            tool_call_id="call-1",
+            decision="allow",
+            is_error=False,
+            details={
+                "execution_id": "exec-1",
+                "run_id": "run-1",
+                "batch_id": "batch-1",
+                "ordinal": 3,
+                "policy_epoch": 7,
+            },
+        ))
+
+        [call] = storage.calls
+        data = call["data"]
+        # The five execution fields are present at the top level, not
+        # only buried inside ``data["details"]``.
+        assert data["execution_id"] == "exec-1"
+        assert data["run_id"] == "run-1"
+        assert data["batch_id"] == "batch-1"
+        assert data["ordinal"] == 3
+        assert data["policy_epoch"] == 7
+        # Every other canonical field survives too.
+        assert data["reason"] == "approval required"
+        assert data["snapshot_id"] == "snap-1"
+        assert data["tool_name"] == "mcp__github__search"
+        assert data["tool_call_id"] == "call-1"
+        assert data["decision"] == "allow"
+        assert data["is_error"] is False
+        assert data["before"]["allowed_write_paths"] == ["/a"]
+        assert data["after"]["allowed_write_paths"] == ["/b"]
+        assert data["details"]["execution_id"] == "exec-1"
+
+
+class TestStorageBackendSaveLogDeprecation:
+    def test_save_log_survives_but_is_marked_deprecated(self) -> None:
+        # ``save_log`` is kept for backward compatibility but is no longer
+        # a supported write path — the canonical pipeline is ``AuditLog``
+        # plus a secondary sink. Its docstring must say so.
+        assert hasattr(StorageBackend, "save_log")
+        doc = StorageBackend.save_log.__doc__ or ""
+        assert "deprecat" in doc.lower()
+
+    async def test_default_save_log_still_raises_not_implemented(self) -> None:
+        backend = StorageBackend()
+        with pytest.raises(NotImplementedError):
+            await backend.save_log(
+                datetime.now(timezone.utc), "policy_change", "host"
+            )
 
 
 class TestAuditRecordImmutability:

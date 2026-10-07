@@ -9,9 +9,11 @@ reconcile are exactly the Q20 anti-pattern.
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
+from .audit_log import AUDIT_SCHEMA_VERSION
 from .types import AuditEntry
 
 
@@ -47,6 +49,17 @@ def storage_secondary_sink(
     audit entry itself doesn't carry one (it's a separate identifier in
     ``StorageBackend``'s schema). When ``session_id`` is None the
     adapter writes ``None``, matching the legacy save_log signature.
+
+    The stored ``data`` payload is a **superset** of the canonical audit
+    record: it carries the same ``{"schema": ..., **asdict(entry)}`` fields
+    the JSONL writer emits, *plus* the execution/authorisation fields from
+    ``details`` (``execution_id``, ``run_id``, ``batch_id``, ``ordinal``,
+    ``policy_epoch``, ...) promoted to the top level so the secondary store
+    is queryable on them rather than a lossy subset (Q20). Because those
+    fields are promoted, the mirrored row has extra top-level keys versus
+    the JSONL record — additive, and the nested ``details`` mapping is still
+    present unchanged; code diffing the two streams should expect the
+    superset.
     """
 
     async def _sink(entry: AuditEntry) -> None:
@@ -59,18 +72,21 @@ def storage_secondary_sink(
             ts = datetime.fromisoformat(entry.timestamp)
         except Exception:
             ts = datetime.now(timezone.utc)
-        # Bundle the audit-specific fields into ``data`` so the
-        # downstream schema doesn't need to grow a column per audit
-        # variant. Storage backends already store this as JSON/TEXT.
-        data = {
-            "reason": entry.reason,
-            "snapshot_id": entry.snapshot_id,
-            "tool_name": entry.tool_name,
-            "tool_call_id": entry.tool_call_id,
-            "decision": entry.decision,
-            "is_error": entry.is_error,
-            "details": entry.details,
-        }
+        # Mirror the canonical JSONL record exactly, then promote the
+        # per-event fields out of ``details`` so nothing is dropped and
+        # the execution fields stay indexable. Canonical top-level
+        # fields win on any key collision with ``details``; the nested
+        # ``details`` mapping is retained unchanged for compatibility.
+        #
+        # ``schema`` is stamped from the module default rather than the
+        # owning ``AuditLog``'s configured ``schema_version``: the sink
+        # boundary receives only the entry, not the log. A host that
+        # overrides ``AuditLog(schema_version=...)`` would therefore see
+        # the JSONL and this mirrored row disagree; treat the module
+        # constant as authoritative for mirrored rows until the sink
+        # interface carries the version through.
+        record = {"schema": AUDIT_SCHEMA_VERSION, **asdict(entry)}
+        data = {**entry.details, **record}
         await storage.save_log(
             timestamp=ts,
             event=entry.event,

@@ -70,6 +70,15 @@ class StorageBackend:
         raise NotImplementedError
 
     async def save_log(self, timestamp: datetime, event: str, actor: str, session_id: str | None = None, data: Any = None) -> None:
+        """Deprecated: use ``AuditLog`` (optionally via a secondary sink).
+
+        Superseded by the canonical audit pipeline in
+        ``titanx.policy.audit_log.AuditLog``. Writing here directly creates
+        a second, unreconciled audit stream (the Q20 anti-pattern); route
+        audit records through ``AuditLog`` and fan out with
+        ``titanx.policy.audit_sinks.storage_secondary_sink`` instead. Retained
+        for backward compatibility and not slated for removal.
+        """
         raise NotImplementedError
 
     async def list_logs(self, session_id: str | None = None, limit: int = 100) -> list[LogEntry]:

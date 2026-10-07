@@ -5,7 +5,8 @@ did NOT roll back the relaxed policy — leaving the system in a quietly
 more-permissive state forever. The new contract:
 
 - ``revoke()`` rolls back AND cancels the timer (single locked path).
-- ``dispose()`` is retained for source-compat but does not roll back.
+- ``dispose()`` is an async alias for the same locked rollback path, so
+  disposing can never leave the relaxed policy live.
 - ``ttl_ms <= 0`` and non-int values are rejected at the boundary.
 - Snapshots are deep-copied so audit entries cannot be mutated by
   later edits to the live policy.
@@ -65,6 +66,42 @@ class TestRevokeRollsBack:
         # aclose is the gateway-shutdown path; it must roll back the
         # policy too, not just stop the timer.
         await bg.aclose()
+        assert "/tmp" not in store.get_policy().allowed_write_paths
+        assert bg.is_active() is False
+
+
+class TestDisposeRollsBack:
+    async def test_dispose_restores_original_policy(
+        self, store: PolicyStore, relaxed: AgentPolicy
+    ) -> None:
+        bg = BreakGlassController(store)
+        await bg.activate("incident-fix", 60_000, relaxed)
+        # Precondition: the widened policy is live.
+        assert "/tmp" in store.get_policy().allowed_write_paths
+        assert store.get_policy().auto_approve_tools is True
+
+        await bg.dispose()
+
+        # dispose() must roll back, not merely cancel the TTL timer.
+        assert "/tmp" not in store.get_policy().allowed_write_paths
+        assert store.get_policy().auto_approve_tools is False
+        assert bg.is_active() is False
+
+
+    async def test_dispose_is_idempotent_and_safe_without_grant(
+        self, store: PolicyStore, relaxed: AgentPolicy
+    ) -> None:
+        bg = BreakGlassController(store)
+        # Never granted: disposing is a no-op, not an error.
+        await bg.dispose()
+        assert store.get_policy().auto_approve_tools is False
+
+        await bg.activate("incident-fix", 60_000, relaxed)
+        await bg.dispose()
+        assert "/tmp" not in store.get_policy().allowed_write_paths
+
+        # Second dispose after rollback is a no-op and must not raise.
+        await bg.dispose()
         assert "/tmp" not in store.get_policy().allowed_write_paths
         assert bg.is_active() is False
 

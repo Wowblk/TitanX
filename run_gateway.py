@@ -1,6 +1,9 @@
-"""Compatibility entry; use python run.py --web.
+"""Compatibility entry; use ``python run.py --web``.
 
-uvicorn run_gateway:app remains supported; storage opens during lifespan.
+``uvicorn run_gateway:app`` remains supported, but this import-mode object is
+built with no storage backend, so ``/api/memory``, ``/api/jobs`` and
+``/api/logs`` return 501. Use ``python run.py --web`` (or the ``titanx-app``
+console script) for a gateway that opens a local backend under the data dir.
 """
 import sys
 
