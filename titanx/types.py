@@ -114,6 +114,12 @@ class TaskState:
 
 @dataclass(frozen=True)
 class AgentConfig:
+    # Host-supplied identity tuple. TitanX never authenticates these values —
+    # they are trusted as authored. They are copied into ``ExecutionGuard``'s
+    # binding so a tool approval cannot be replayed under a changed identity,
+    # and are stamped into audit records. Hosts MUST authenticate the caller
+    # and populate these from trusted state before building the config; the
+    # runtime does not validate them against any external source.
     thread_id: str
     session_id: str
     user_id: str

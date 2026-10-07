@@ -72,6 +72,17 @@ class ApprovalGrant:
 
 
 class ExecutionGuard:
+    """Bind each approved tool call to the run that authorised it.
+
+    Identity is **not** authenticated here. The ``(thread_id, session_id,
+    user_id, channel)`` tuple is read verbatim from the host-supplied
+    ``AgentConfig``; this guard only uses it to *bind* an approval to a run
+    and to detect a mid-run identity change (``identity_changed``) — an
+    anti-replay/consistency check, not caller authentication. Authenticating
+    and authorising the caller, and populating those ``AgentConfig`` fields
+    from trusted state, is the host's responsibility.
+    """
+
     def __init__(
         self, policy_store: PolicyStore, tools: list[ToolDefinition],
         options: ExecutionGuardOptions | None = None, *,
