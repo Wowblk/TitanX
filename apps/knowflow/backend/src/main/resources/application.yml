@@ -1,0 +1,116 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: knowflow
+
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/knowflow?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=utf8}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:}
+
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DATABASE:0}
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
+    listener:
+      auto-startup: ${KAFKA_LISTENER_AUTO_STARTUP:false}
+      ack-mode: manual
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP_ID:knowflow}
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+    producer:
+      acks: all
+      retries: 3
+      properties:
+        enable.idempotence: true
+
+  elasticsearch:
+    uris: ${ES_URIS:http://127.0.0.1:9200}
+    username: ${ES_USERNAME:}
+    password: ${ES_PASSWORD:}
+
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY:${KIMI_API_KEY:dummy}}
+      base-url: ${OPENAI_BASE_URL:${KIMI_BASE_URL:https://api.moonshot.cn}}
+      chat:
+        options:
+          model: ${OPENAI_CHAT_MODEL:${KIMI_CHAT_MODEL:moonshot-v1-8k}}
+    deepseek:
+      api-key: ${DEEPSEEK_API_KEY:dummy}
+    vectorstore:
+      elasticsearch:
+        index-name: ${ES_VECTOR_INDEX:knowflow-ai-index}
+        initialize-schema: ${ES_VECTOR_INITIALIZE_SCHEMA:false}
+
+mybatis:
+  mapper-locations: classpath*:mapper/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+
+auth:
+  jwt:
+    issuer: ${JWT_ISSUER:knowflow}
+    key-id: ${JWT_KEY_ID:knowflow-key}
+    private-key: ${JWT_PRIVATE_KEY:file:./config/keys/private.pem}
+    public-key: ${JWT_PUBLIC_KEY:file:./config/keys/public.pem}
+    access-token-ttl: ${JWT_ACCESS_TOKEN_TTL:15m}
+    refresh-token-ttl: ${JWT_REFRESH_TOKEN_TTL:7d}
+
+oss:
+  mode: ${OSS_MODE:local}
+  local-root: ${OSS_LOCAL_ROOT:data/uploads}
+  local-public-prefix: ${OSS_LOCAL_PUBLIC_PREFIX:/api/v1/storage/local-files}
+  endpoint: ${OSS_ENDPOINT:oss-cn-beijing.aliyuncs.com}
+  access-key-id: ${OSS_ACCESS_KEY_ID:dummy}
+  access-key-secret: ${OSS_ACCESS_KEY_SECRET:dummy}
+  bucket: ${OSS_BUCKET:knowflow-test}
+  public-domain: ${OSS_PUBLIC_DOMAIN:http://example.com}
+
+canal:
+  enabled: ${CANAL_ENABLED:false}
+  host: ${CANAL_HOST:127.0.0.1}
+  port: ${CANAL_PORT:11111}
+  destination: ${CANAL_DESTINATION:example}
+  username: ${CANAL_USERNAME:}
+  password: ${CANAL_PASSWORD:}
+  filter: ${CANAL_FILTER:.*\\..*}
+  batchSize: ${CANAL_BATCH_SIZE:100}
+  intervalMs: ${CANAL_INTERVAL_MS:1000}
+
+counter:
+  bitmap:
+    storage: ${COUNTER_BITMAP_STORAGE:native}
+  rebuild:
+    enabled: ${COUNTER_REBUILD_ENABLED:false}
+    lock:
+      watchdog-ms: ${COUNTER_REBUILD_LOCK_WATCHDOG_MS:30000}
+
+agent:
+  titanx:
+    base-url: ${TITANX_BASE_URL:http://127.0.0.1:3000}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when_authorized
+  health:
+    elasticsearch:
+      enabled: ${MANAGEMENT_HEALTH_ELASTICSEARCH_ENABLED:false}
+    kafka:
+      enabled: ${MANAGEMENT_HEALTH_KAFKA_ENABLED:false}

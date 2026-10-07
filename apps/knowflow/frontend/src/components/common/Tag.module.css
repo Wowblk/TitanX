@@ -1,0 +1,21 @@
+.tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-primary-strong);
+  background: rgba(21, 154, 140, 0.1);
+}
+
+.toneSuccess {
+  background: rgba(18, 192, 123, 0.1);
+  color: #08a466;
+}
+
+.toneNeutral {
+  background: rgba(118, 118, 138, 0.1);
+  color: var(--color-text-muted);
+}

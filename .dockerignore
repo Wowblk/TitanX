@@ -1,0 +1,31 @@
+# The repo root is a Docker build context only for the titanx-agent image (see
+# apps/knowflow/deploy/docker-compose.yml), which needs titanx/, ui/,
+# pyproject.toml, README.md and apps/knowflow/titanx-agent/. Everything the
+# other KnowFlow services build uses apps/knowflow/ as its context and their own
+# apps/knowflow/.dockerignore, so this file does not affect them.
+.git
+.gitignore
+.venv
+venv
+env
+.idea
+.vscode
+.DS_Store
+
+**/node_modules
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+**/dist
+**/build
+**/target
+**/.gocache
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/*.log
+
+.titanx
+.env
+.env.*
+!.env.example

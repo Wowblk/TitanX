@@ -1,0 +1,31 @@
+[project]
+name = "knowflow-agent"
+version = "0.4.0"
+description = "KnowFlow agent glue (Kimi LLM adapter + KnowFlow tool runtime) built on the TitanX SDK"
+requires-python = ">=3.11"
+# The SDK is no longer vendored: this package uses the TitanX source at the
+# monorepo root (../../../titanx). It is deliberately NOT declared here — a
+# relative ``titanx @ file:../../..`` direct reference is not installable by pip
+# (it rejects a relative file: URL), and the monorepo's workflow shares one venv
+# with the root install. Install the SDK first:  pip install -e ../../..
+# See README.md ("Setup") for the full sequence.
+dependencies = [
+    "uvicorn[standard]>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["knowflow_agent*"]

@@ -1,0 +1,35 @@
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(21, 154, 140, 0.22);
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--color-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 24px rgba(26, 26, 44, 0.10);
+}
+
+.following {
+  color: var(--color-primary-strong);
+  border-color: rgba(21, 154, 140, 0.32);
+  background: rgba(255, 248, 238, 0.8);
+}
+
+.mutualBadge {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.icon {
+  width: 16px;
+  height: 16px;
+}

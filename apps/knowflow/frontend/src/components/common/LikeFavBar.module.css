@@ -1,0 +1,37 @@
+._bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  cursor: pointer;
+  user-select: none;
+}
+
+.btn:hover { color: var(--color-text); }
+
+.liked { color: #e74c3c; }
+.faved { color: var(--color-primary-strong); }
+
+.count {
+  min-width: 10px;
+}
+
+.compact .btn {
+  padding: 0;
+}
+
+.disabled {
+  opacity: 0.6;
+  pointer-events: none;
+}

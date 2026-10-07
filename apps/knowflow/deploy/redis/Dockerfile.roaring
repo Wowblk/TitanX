@@ -1,0 +1,14 @@
+FROM redis:8.6.2-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git cmake build-essential python3 && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git clone https://github.com/aviggiano/redis-roaring.git . \
+    && git checkout 360327e0ae79cf87a4fc8e912e28590efd8c2f4c \
+    && git submodule update --init deps/CRoaring deps/hiredis
+RUN cd src && ../deps/CRoaring/amalgamation.sh
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_REDIS_ALLOCATOR=ON \
+    && cmake --build build --target redis-roaring -j 4
+
+FROM redis:8.6.2-bookworm
+COPY --from=build /src/build/libredis-roaring.so /usr/local/lib/redis-roaring.so
+CMD ["redis-server", "--loadmodule", "/usr/local/lib/redis-roaring.so", "--appendonly", "yes"]

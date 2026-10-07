@@ -1,0 +1,119 @@
+server:
+  port: "8380"
+  ginmode: release
+  pprofenabled: false
+
+logger:
+  level: info
+  filepath: logs/gateway.log
+  maxsize: 100
+  maxbackups: 5
+  maxage: 14
+  compress: true
+
+middleware:
+  ratelimit: true
+  ipacl: false
+  antiinjection: false
+  auth: false
+  breaker: false
+  tracing: false
+
+grpc:
+  enabled: false
+  prefix: /grpc
+  healthcheckpath: /grpc/health
+  reflection: false
+  allowedorigins:
+    - "*"
+
+websocket:
+  enabled: true
+  maxidleconns: 10
+  idletimeout: 5m0s
+  prefix: /websocket
+
+routing:
+  rules:
+    /api/v1/*path:
+      - target: http://backend:8080
+        weight: 100
+        env: stable
+        protocol: http
+        healthcheckpath: /actuator/health
+  engine: gin
+  loadbalancer: weighted_round_robin
+  heartbeatinterval: 30
+  grayscale:
+    enabled: false
+    weightedrandom: false
+    defaultenv: stable
+    canaryenv: canary
+
+security:
+  authmode: jwt
+  jwt:
+    secret: change-to-your-secret-key
+    expiresin: 7200000
+    enabled: false
+  rbac:
+    enabled: false
+    modelpath: config/data/rbac_model.conf
+    policypath: config/data/rbac_policy.csv
+  ipblacklist: []
+  ipwhitelist: []
+  ipupdatemode: override
+
+cache:
+  addr: redis:6379
+  password: ""
+  db: 0
+
+caching:
+  enabled: false
+  rules: []
+
+consul:
+  enabled: false
+  addr: 127.0.0.1:8300
+
+traffic:
+  ratelimit:
+    enabled: true
+    qps: 100
+    burst: 300
+    algorithm: leaky_bucket
+    ip_limits: {}
+    route_limits:
+      "/api/v1/*path":
+        qps: 800
+        burst: 2000
+        enable: true
+  breaker:
+    enabled: false
+    errorrate: 0.5
+    timeout: 1000
+    minrequests: 20
+    sleepwindow: 5000
+    maxconcurrent: 100
+    windowsize: 100
+    windowduration: 10
+
+observability:
+  grafana:
+    httpEndpoint: ""
+  prometheus:
+    enabled: true
+    path: /metrics
+    httpEndpoint: ""
+  jaeger:
+    enabled: false
+    endpoint: ""
+    httpEndpoint: ""
+    sampler: always
+    sampleratio: 1
+
+plugin:
+  dir: bin/plugins
+  plugins: []
+

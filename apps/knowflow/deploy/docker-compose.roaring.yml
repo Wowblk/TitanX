@@ -1,0 +1,21 @@
+# Overlay: stop all writers and run the migration before starting backend.
+services:
+  redis:
+    image: knowflow-redis-roaring:360327e
+    build:
+      context: ..
+      dockerfile: deploy/redis/Dockerfile.roaring
+    command: ["redis-server", "--loadmodule", "/usr/local/lib/redis-roaring.so", "--appendonly", "yes"]
+  backend:
+    environment:
+      COUNTER_BITMAP_STORAGE: roaring
+  bitmap-migrate:
+    image: python:3.12-slim
+    profiles: ["maintenance"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../backend/scripts:/tools:ro
+    entrypoint: ["python", "/tools/migrate-bitmaps.py", "--host", "redis"]
+    command: []

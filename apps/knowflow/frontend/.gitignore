@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+
+# production build
+dist/
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# env & secrets
+.env
+.env.*.local
+
+# editor & OS
+.DS_Store
+.vscode/
+.idea/
+
+# testing / coverage / caches
+coverage/
+.temp/
+.tmp/
+*.tsbuildinfo
+
+# vite
+*.local
+
+# lockfile（注意：三选一提交，其他忽略）
+# 如果你用 npm，请删除下面两行；如果用 pnpm/yarn，则保留对应一行并提交那个锁文件
+# yarn.lock
+# pnpm-lock.yaml

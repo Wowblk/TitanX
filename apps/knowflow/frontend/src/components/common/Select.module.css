@@ -1,0 +1,73 @@
+.wrapper {
+  position: relative;
+}
+
+.box {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: none;
+  border-radius: 18px;
+  padding: 16px 32px 16px 18px;
+  background: rgba(255, 249, 240, 0.95);
+  box-shadow: inset 0 0 0 1px rgba(31, 49, 67, 0.12);
+  font-size: 15px;
+  color: var(--color-text-strong);
+  cursor: pointer;
+}
+
+.value {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.arrow {
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 6px solid var(--color-primary);
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 100%;
+  max-height: 240px;
+  overflow: auto;
+  border-radius: 16px;
+  background: var(--color-surface);
+  box-shadow: 0 16px 40px rgba(26, 26, 44, 0.12), inset 0 0 0 1px var(--color-border);
+  z-index: 20;
+}
+
+.option {
+  padding: 12px 18px;
+  font-size: 15px;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.option:hover,
+.optionActive {
+  background: var(--color-secondary);
+  color: var(--color-text-strong);
+}
+
+.optionSelected {
+  font-weight: 600;
+  color: var(--color-primary-strong);
+}
+
+.label {
+  display: block;
+  margin-bottom: 10px;
+  font-weight: 600;
+  color: var(--color-text-strong);
+}

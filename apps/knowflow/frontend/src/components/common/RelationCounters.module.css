@@ -1,0 +1,25 @@
+.wrapper {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--color-text-muted);
+}
+
+.number {
+  color: var(--color-text-strong);
+  font-weight: 700;
+}
+
+.label {
+  font-size: 12px;
+}
+
+.clickable {
+  cursor: pointer;
+}

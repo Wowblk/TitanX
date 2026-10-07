@@ -36,6 +36,20 @@ always be flagged in the **Changed** / **Removed** sections.
   host keeps its hermetic behavior, while `application.main --web` opens a
   `LibSQLBackend` under the data dir so the shipped CLI serves those routes
   without 501 (`docs/design-review-2026-10-07.md` problem #12).
+- **`return_direct` tool short-circuit** — `ToolDefinition.return_direct` lets a
+  tool whose result *is* the answer end the turn: once its output is committed
+  the runtime presents that output as the final assistant message instead of
+  asking the LLM for a second turn. It fires only when the call is the batch's
+  last, the output is non-empty, and it neither errored nor was blocked by the
+  output safety scan; the answer is the *inspected* content (post injection scan
+  / PII redaction) and is not wrapped in `<tool_output>`. `ExecutionGuard`
+  validates the flag is a boolean and MCP contract cloning preserves it.
+- **Per-request context for gateway session factories** —
+  `GatewayOptions.create_runtime` may opt in to receiving the decoded request
+  body by naming a parameter `request_context`; `SessionRegistry.get_or_create`
+  forwards it and `routes/chat.py` supplies the `POST /api/chat` body (or the
+  first WS frame). The context is consulted only when the session is created, so
+  a session's credentials cannot be swapped by a later request reusing the id.
 
 ### Changed
 
@@ -116,6 +130,17 @@ always be flagged in the **Changed** / **Removed** sections.
   `config.max_iterations == 10`). `AgentRuntime` still accepts them as
   constructor arguments, but solely to seed a *new* policy when the host does not
   inject a `policy_store` (`docs/design-review-2026-10-07.md` §2.3).
+- **KnowFlow is now part of this repository (monorepo)** — the KnowFlow product
+  moved to `apps/knowflow/` with its full history, and the SDK copy it used to
+  vendor under `apps/knowflow/titanx-agent/titanx/` is **removed**. The agent's
+  KnowFlow-specific glue now lives in
+  `apps/knowflow/titanx-agent/knowflow_agent/` and imports the SDK from the repo
+  root (installed into the same venv; not a declared dependency, since pip cannot
+  install a relative `file:` reference). `run_gateway.py` was rewritten for the
+  0.4.0 application layer (explicit `AgentPolicy` allowlisting the four KnowFlow
+  tools, `request_context` for per-session credentials), and the `titanx-agent`
+  image now builds from the repository root. The root `pytest` is scoped to
+  `tests/`; the agent suite runs from its own directory.
 
 ### Fixed
 

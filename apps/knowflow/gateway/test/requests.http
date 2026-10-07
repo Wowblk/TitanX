@@ -1,0 +1,46 @@
+### 测试 User 服务路由 - JWT
+GET http://localhost:8080/api/v1/user
+X-Test: update
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VybmFtZSI6ImFkbWluIiwic3ViIjoiYWRtaW4iLCJleHAiOjE3NDg3NzY3OTUsImlhdCI6MTc0MTU3Njc5NX0.cf3khGyVVMT4riJiXFrD40dXWVfQYL1LOppvq7d0RcY
+
+### 测试 User 服务路由 - JWT
+GET http://localhost:8080/api/v1/user
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VybmFtZSI6ImFkbWluIiwic3ViIjoiYWRtaW4iLCJleHAiOjE3NDg3OTYzOTQsImlhdCI6MTc0MTU5NjM5NH0.exu9HIChKONZFjE5Ku2vCXfLyHp_xjU-YSOUmF-lpHQ
+
+### 测试 User 服务路由 - RBAC
+GET http://localhost:8080/api/v1/user
+Authorization: Bearer f0hO4EbKJ-oKIykjGbuKjZ6PAoeL5oj0an8wYdrqHK4=
+
+### 测试 User 服务路由 - RBAC
+GET http://localhost:8080/api/v1/user
+Authorization: Bearer f0hO4EbKJ-oKIykjGbuKjZ6PAoeL5oj0an8wYdrqHK4=
+
+### 测试 Order 服务路由
+GET http://localhost:8080/api/v1/user
+
+### 测试 grpc 服务路由，GET
+GET http://localhost:8080/grpc/api/v2/hello/?name=test_user_1
+
+### 测试 grpc 服务路由，POST
+POST http://localhost:8080/grpc/api/v2/hello
+
+{
+    "name": "test_user_2"
+}
+
+### 测试健康检查
+GET http://localhost:8080/health
+
+### 获取Token [JWT, RBAC]
+POST http://localhost:8080/login
+Content-Type: application/json
+
+{
+    "username": "admin",
+    "password": "password"
+}
+
+
+### metrics
+GET http://localhost:8080/metrics
+

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>网关状态</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+    <!-- 自定义样式 -->
+    <style>
+        body { background-color: #f8f9fa; padding: 20px; }
+        .navbar { margin-bottom: 20px; }
+        .card { margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .card-header { cursor: pointer; }
+        .spinner { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+        .table-responsive { max-height: 300px; overflow-y: auto; }
+        .badge-success { background-color: #28a745; }
+        .badge-danger { background-color: #dc3545; }
+    </style>
+</head>
+<body>
+<!-- 导航栏 -->
+<nav class="navbar navbar-dark bg-dark">
+    <div class="container-fluid">
+        <span class="navbar-brand mb-0 h1">网关状态监控</span>
+        <button class="btn btn-outline-light" onclick="refreshPage()">立即刷新</button>
+    </div>
+</nav>
+
+<!-- 加载动画 -->
+<div class="spinner-border text-primary spinner" role="status">
+    <span class="visually-hidden">加载中...</span>
+</div>
+
+<div class="container">
+    <!-- 网关信息 -->
+    <div class="card">
+        <div class="card-header" data-bs-toggle="collapse" data-bs-target="#gatewayCollapse">
+            <h5 class="mb-0">网关信息</h5>
+        </div>
+        <div id="gatewayCollapse" class="collapse show">
+            <div class="card-body">
+                <table class="table table-striped">
+                    <tbody>
+                    <tr><th>运行时间</th><td>{{.Gateway.Uptime}}</td></tr>
+                    <tr><th>版本</th><td>{{.Gateway.Version}}</td></tr>
+                    <tr><th>内存分配</th><td>{{.Gateway.MemoryAlloc}} 字节</td></tr>
+                    <tr><th>协程数</th><td>{{.Gateway.GoroutineCount}}</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 后端统计 -->
+    <div class="card">
+        <div class="card-header" data-bs-toggle="collapse" data-bs-target="#backendCollapse">
+            <h5 class="mb-0">后端统计</h5>
+        </div>
+        <div id="backendCollapse" class="collapse show">
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover">
+                        <thead>
+                        <tr>
+                            <th>Rule</th>
+                            <th>Protocol</th>
+                            <th>URL</th>
+                            <th>成功次数(非缓存)</th>
+                            <th>失败次数</th>
+                            <th>探测成功</th>
+                            <th>探测失败</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        {{range .BackendStats}}
+                        <tr>
+                            <td>{{.Rule}}</td>
+                            <td>{{.Protocol}}</td>
+                            <td>{{.URL}}</td>
+                            <td>{{.SuccessCount}}</td>
+                            <td>{{.FailureCount}}</td>
+                            <td>{{.ProbeSuccessCount}}</td>
+                            <td>{{.ProbeFailureCount}}</td>
+                        </tr>
+                        {{end}}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 后端缓存统计 -->
+    <div class="card">
+        <div class="card-header" data-bs-toggle="collapse" data-bs-target="#cachedCollapse">
+            <h5 class="mb-0">后端缓存统计</h5>
+        </div>
+        <div id="cachedCollapse" class="collapse show">
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover">
+                        <thead>
+                        <tr>
+                            <th>Path</th>
+                            <th>缓存次数</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        {{range .CachedStats}}
+                        <tr>
+                            <td>{{.Path}}</td>
+                            <td>{{.Count}}</td>
+                        </tr>
+                        {{end}}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 插件 -->
+    <div class="card">
+        <div class="card-header" data-bs-toggle="collapse" data-bs-target="#pluginsCollapse">
+            <h5 class="mb-0">插件</h5>
+        </div>
+        <div id="pluginsCollapse" class="collapse show">
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover">
+                        <thead>
+                        <tr>
+                            <th>名称</th>
+                            <th>版本</th>
+                            <th>描述</th>
+                            <th>状态</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        {{range .Plugins}}
+                        <tr>
+                            <td>{{.Name}}</td>
+                            <td>{{.Version}}</td>
+                            <td>{{.Description}}</td>
+                            <td><span class="badge {{if .Enabled}}badge-success{{else}}badge-danger{{end}}">{{if .Enabled}}启用{{else}}禁用{{end}}</span></td>
+                        </tr>
+                        {{end}}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 配置摘要 -->
+    <div class="card">
+        <div class="card-header" data-bs-toggle="collapse" data-bs-target="#configCollapse">
+            <h5 class="mb-0">配置摘要</h5>
+        </div>
+        <div id="configCollapse" class="collapse show">
+            <div class="card-body">
+                <table class="table table-striped">
+                    <tbody>
+                    <tr><th>服务器端口</th><td>{{.ConfigSummary.Server.Port}}</td></tr>
+                    <tr><th>Gin 模式</th><td>{{.ConfigSummary.Server.GinMode}}</td></tr>
+                    <tr><th>日志级别</th><td>{{.ConfigSummary.Logger.Level}}</td></tr>
+                    <tr><th>中间件 - 限流</th><td><span class="badge {{if .ConfigSummary.Middleware.RateLimit}}badge-success{{else}}badge-danger{{end}}">{{if .ConfigSummary.Middleware.RateLimit}}启用{{else}}禁用{{end}}</span></td></tr>
+                    <tr><th>中间件 - IP ACL</th><td><span class="badge {{if .ConfigSummary.Middleware.IPAcl}}badge-success{{else}}badge-danger{{end}}">{{if .ConfigSummary.Middleware.IPAcl}}启用{{else}}禁用{{end}}</span></td></tr>
+                    <tr><th>中间件 - 防注入</th><td><span class="badge {{if .ConfigSummary.Middleware.AntiInjection}}badge-success{{else}}badge-danger{{end}}">{{if .ConfigSummary.Middleware.AntiInjection}}启用{{else}}禁用{{end}}</span></td></tr>
+                    <tr><th>中间件 - 认证</th><td><span class="badge {{if .ConfigSummary.Middleware.Auth}}badge-success{{else}}badge-danger{{end}}">{{if .ConfigSummary.Middleware.Auth}}启用{{else}}禁用{{end}}</span></td></tr>
+                    <tr><th>中间件 - 熔断</th><td><span class="badge {{if .ConfigSummary.Middleware.Breaker}}badge-success{{else}}badge-danger{{end}}">{{if .ConfigSummary.Middleware.Breaker}}启用{{else}}禁用{{end}}</span></td></tr>
+                    <tr><th>中间件 - 追踪</th><td><span class="badge {{if .ConfigSummary.Middleware.Tracing}}badge-success{{else}}badge-danger{{end}}">{{if .ConfigSummary.Middleware.Tracing}}启用{{else}}禁用{{end}}</span></td></tr>
+                    <tr><th>路由引擎</th><td>{{.ConfigSummary.Routing.Engine}}</td></tr>
+                    <tr><th>负载均衡</th><td>{{.ConfigSummary.Routing.LoadBalancer}}</td></tr>
+                    <tr><th>心跳间隔</th><td>{{.ConfigSummary.Routing.HeartbeatInterval}} 秒</td></tr>
+                    <tr><th>认证模式</th><td>{{.ConfigSummary.Security.AuthMode}}</td></tr>
+                    <tr><th>JWT 启用</th><td><span class="badge {{if .ConfigSummary.Security.JWTEnabled}}badge-success{{else}}badge-danger{{end}}">{{if .ConfigSummary.Security.JWTEnabled}}是{{else}}否{{end}}</span></td></tr>
+                    <tr><th>RBAC 启用</th><td><span class="badge {{if .ConfigSummary.Security.RBACEnabled}}badge-success{{else}}badge-danger{{end}}">{{if .ConfigSummary.Security.RBACEnabled}}是{{else}}否{{end}}</span></td></tr>
+                    <tr><th>缓存地址</th><td>{{.ConfigSummary.Cache.Addr}}</td></tr>
+                    <tr><th>访问缓存</th><td>{{.ConfigSummary.Cache.EnabledCaching}}</td></tr>
+                    <tr><th>限流启用</th><td><span class="badge {{if .ConfigSummary.Traffic.RateLimit.Enabled}}badge-success{{else}}badge-danger{{end}}">{{if .ConfigSummary.Traffic.RateLimit.Enabled}}是{{else}}否{{end}}</span></td></tr>
+                    <tr><th>限流 QPS</th><td>{{.ConfigSummary.Traffic.RateLimit.QPS}}</td></tr>
+                    <tr><th>限流算法</th><td>{{.ConfigSummary.Traffic.RateLimit.Algorithm}}</td></tr>
+                    <tr><th>熔断启用</th><td><span class="badge {{if .ConfigSummary.Traffic.Breaker.Enabled}}badge-success{{else}}badge-danger{{end}}">{{if .ConfigSummary.Traffic.Breaker.Enabled}}是{{else}}否{{end}}</span></td></tr>
+                    <tr><th>Prometheus 启用</th><td><span class="badge {{if .ConfigSummary.Observability.PrometheusEnabled}}badge-success{{else}}badge-danger{{end}}">{{if .ConfigSummary.Observability.PrometheusEnabled}}是{{else}}否{{end}}</span></td></tr>
+                    <tr><th>Prometheus UI地址</th><td><span class="badge {{if .ConfigSummary.Observability.PrometheusAddr}}badge-success{{else}}badge-danger{{end}}">{{.ConfigSummary.Observability.PrometheusAddr}}</span></td></tr>
+                    <tr><th>Grafana UI地址</th><td><span class="badge {{if .ConfigSummary.Observability.GrafanaAddr}}badge-success{{else}}badge-danger{{end}}">{{.ConfigSummary.Observability.GrafanaAddr}}</span></td></tr>
+                    <tr><th>Jaeger 启用</th><td><span class="badge {{if .ConfigSummary.Observability.JaegerEnabled}}badge-success{{else}}badge-danger{{end}}">{{if .ConfigSummary.Observability.JaegerEnabled}}是{{else}}否{{end}}</span></td></tr>
+                    <tr><th>Jaeger UI地址</th><td><span class="badge {{if .ConfigSummary.Observability.JaegerAddr}}badge-success{{else}}badge-danger{{end}}">{{.ConfigSummary.Observability.JaegerAddr}}</span></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Bootstrap JS 和自定义脚本 -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+<script>
+    function refreshPage() {
+        document.querySelector('.spinner').style.display = 'block';
+        setTimeout(() => location.reload(), 500); // 延迟刷新以显示加载动画
+    }
+    setInterval(refreshPage, 30000); // 每30秒刷新一次
+</script>
+</body>
+</html>
