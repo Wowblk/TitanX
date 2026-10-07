@@ -9,6 +9,45 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ## [Unreleased]
 
+### Added
+
+- **Single transcript owner** — wholesale replacement of the active message
+  list now goes through one `Transcript` owner (`titanx/context/transcript.py`),
+  shared by context offloading (`ContextManager.prepare`) and compaction. The
+  owner enforces the invariants that were previously only maintained by call
+  ordering: host-pinned system messages are preserved, at most one active
+  summary survives, and assistant `tool_calls` stay paired with their `tool`
+  results. `AgentRuntime.transcript` exposes the owner
+  (`docs/design-review-2026-10-07.md` problem #5).
+- **Runtime teardown contract** — `AgentRuntime.aclose()` (idempotent, never
+  raises) flushes/archives the transcript and tears down the tool layer;
+  `SandboxedToolRuntime.aclose()` forwards to the session manager. The gateway
+  runs teardown on idle/LRU eviction and on shutdown, and per-session context
+  rows are deleted so sessions no longer leak
+  (`docs/design-review-2026-10-07.md` problem #6).
+
+### Changed
+
+- **Deny-by-default tool authorization** — registered tools that do not require
+  approval are now **denied** unless explicitly allowlisted via
+  `AgentPolicy.tool_allowlist` (a validated, normalized list of tool names). The
+  `PolicyStore.check_tool_call` precedence is denylist → unregistered → approval
+  gate → allowlist → deny, with `auto_approve_tools` as an explicit global
+  opt-in. **Breaking:** hosts that relied on the previous implicit allow must add
+  their tools to the allowlist (helper: `PolicyStore.allow_tools()`), matching
+  TXS-02 (`docs/design-review-2026-10-07.md` problem #4).
+- **MCP authorization unified under `PolicyStore`** — `McpAdmissionRuntime`
+  accepts an optional `policy_store`, projects admitted `mcp__{server}__{tool}`
+  names into the single allowlist plane, and writes discovery/admit/deny/drift
+  decisions into the shared `AuditLog` with the `policy_epoch`. MCP tools carry
+  `ToolDefinition.mandatory_approval` so they cannot be silently auto-approved
+  (`docs/design-review-2026-10-07.md` problem #3).
+- **Output-token budget is no longer silently rewritten** — the runtime no
+  longer overwrites `max_output_tokens` with `reserved_output_tokens` (which is
+  a compaction-budget reserve only). Hosts can set the limit explicitly via
+  `create_config(max_output_tokens=...)` or `AgentRuntime(max_output_tokens=...)`
+  (`docs/design-review-2026-10-07.md` problem #7).
+
 ### Fixed
 
 - **Tool audit records carry identity, session and tool contract** —
