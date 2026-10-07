@@ -15,10 +15,14 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ..types import ToolDefinition, ToolExecutionResult, ToolRuntime
+
+if TYPE_CHECKING:
+    from ..policy.policy_store import PolicyStore
 
 
 _MISSING = object()
@@ -353,12 +357,19 @@ class McpAdmissionRuntime(ToolRuntime):
         policy: McpAdmissionPolicy | None = None,
         *,
         revalidate_on_execute: bool = True,
+        policy_store: PolicyStore | None = None,
     ) -> None:
         self._clients = dict(clients)
         for server_id in self._clients:
             _validate_name(server_id, "server id")
         self._policy = policy or McpAdmissionPolicy()
         self._revalidate_on_execute = revalidate_on_execute
+        # Optional bridge into the shared authorisation plane. When supplied,
+        # admitted tools are reflected onto the policy allowlist so
+        # ``PolicyStore.check_tool_call`` is the single decision point, and MCP
+        # admission decisions join the store's audit trail and epoch. ``None``
+        # (the default) preserves fully standalone operation.
+        self._policy_store = policy_store
         self._snapshot: _DiscoverySnapshot | None = None
         self._lock = asyncio.Lock()
 
@@ -371,8 +382,16 @@ class McpAdmissionRuntime(ToolRuntime):
 
         async with self._lock:
             if self._snapshot is None:
-                snapshot = await self._capture_snapshot_bounded()
-                self._raise_for_missing_allowed(snapshot)
+                try:
+                    snapshot = await self._capture_snapshot_bounded()
+                    self._raise_for_missing_allowed(snapshot)
+                except McpAdmissionError as exc:
+                    await self._audit_admission(
+                        "deny", tool_name=None, reason=str(exc),
+                        details={"error": type(exc).__name__},
+                    )
+                    raise
+                await self._activate(snapshot)
                 self._snapshot = snapshot
             return self._clone_definitions(self._snapshot.definitions)
 
@@ -381,12 +400,27 @@ class McpAdmissionRuntime(ToolRuntime):
 
         async with self._lock:
             if self._snapshot is None:
-                snapshot = await self._capture_snapshot_bounded()
-                self._raise_for_missing_allowed(snapshot)
+                try:
+                    snapshot = await self._capture_snapshot_bounded()
+                    self._raise_for_missing_allowed(snapshot)
+                except McpAdmissionError as exc:
+                    await self._audit_admission(
+                        "deny", tool_name=None, reason=str(exc),
+                        details={"error": type(exc).__name__},
+                    )
+                    raise
+                await self._activate(snapshot)
                 self._snapshot = snapshot
                 return
-            current = await self._capture_snapshot_bounded()
-            self._assert_unchanged(self._snapshot, current)
+            try:
+                current = await self._capture_snapshot_bounded()
+                self._assert_unchanged(self._snapshot, current)
+            except McpAdmissionError as exc:
+                await self._audit_admission(
+                    "deny", tool_name=None, reason=str(exc),
+                    details={"error": type(exc).__name__},
+                )
+                raise
 
     def list_tools(self) -> list[ToolDefinition]:
         """Return admitted definitions cached by :meth:`discover`.
@@ -411,7 +445,12 @@ class McpAdmissionRuntime(ToolRuntime):
                     snapshot = await self._capture_snapshot_bounded()
                     self._raise_for_missing_allowed(snapshot)
                 except McpAdmissionError as exc:
+                    await self._audit_admission(
+                        "deny", tool_name=name, reason=str(exc),
+                        details={"error": type(exc).__name__},
+                    )
                     return self._admission_failure(exc)
+                await self._activate(snapshot)
                 self._snapshot = snapshot
                 newly_discovered = True
 
@@ -420,6 +459,10 @@ class McpAdmissionRuntime(ToolRuntime):
                     current = await self._capture_snapshot_bounded()
                     self._assert_unchanged(self._snapshot, current)
                 except McpAdmissionError as exc:
+                    await self._audit_admission(
+                        "deny", tool_name=name, reason=str(exc),
+                        details={"error": type(exc).__name__},
+                    )
                     return self._admission_failure(exc)
 
             binding = self._snapshot.bindings.get(name)
@@ -659,6 +702,9 @@ class McpAdmissionRuntime(ToolRuntime):
                         parameters=normalized_schema,
                         requires_approval=self._policy.requires_approval,
                         requires_sanitization=self._policy.requires_sanitization,
+                        # MCP's own approval requirement must not be waivable
+                        # by the coarse host-level auto_approve_tools switch.
+                        mandatory_approval=self._policy.requires_approval,
                         metadata={
                             "source": "mcp",
                             "mcp_server_id": server_id,
@@ -821,6 +867,73 @@ class McpAdmissionRuntime(ToolRuntime):
             error=error,
         )
 
+    async def _activate(self, snapshot: _DiscoverySnapshot) -> None:
+        """Reflect admitted tools into the shared policy plane and audit allows.
+
+        Registration goes through the validated, audited ``allow_tools``
+        mutation rather than touching policy internals, so a wired store keeps
+        a single decision point at ``PolicyStore.check_tool_call``. Both the
+        registration and the audit writes are best-effort: a broken store or
+        audit backend must never break MCP admission.
+        """
+        store = self._policy_store
+        if store is not None:
+            try:
+                await store.allow_tools(
+                    [definition.name for definition in snapshot.definitions],
+                    reason="MCP admission",
+                    actor="host",
+                )
+            except Exception:
+                pass
+        for definition in snapshot.definitions:
+            metadata = definition.metadata
+            await self._audit_admission(
+                "allow",
+                tool_name=definition.name,
+                reason="MCP tool admitted",
+                details={
+                    "source": "mcp",
+                    "mcp_server_id": metadata.get("mcp_server_id"),
+                    "mcp_tool_name": metadata.get("mcp_tool_name"),
+                    "mcp_contract_trust": metadata.get("mcp_contract_trust"),
+                },
+            )
+
+    async def _audit_admission(
+        self,
+        decision: str,
+        *,
+        tool_name: str | None,
+        reason: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Record an admission decision on the shared audit trail (best-effort).
+
+        Never raises: the append is wrapped so an audit backend failure cannot
+        break admission or silently change the decision. ``policy_epoch`` ties
+        the record to the exact policy revision that was in force.
+        """
+        store = self._policy_store
+        if store is None:
+            return
+        merged: dict[str, Any] = {"policy_epoch": store.epoch}
+        if details:
+            merged.update(details)
+        try:
+            from ..policy.types import AuditEntry
+            await store.get_audit_log().append(AuditEntry(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                event="tool_decision",
+                actor="host",
+                reason=reason,
+                tool_name=tool_name,
+                decision=decision,  # type: ignore[arg-type]
+                details=merged,
+            ))
+        except Exception:
+            pass
+
     @staticmethod
     def _clone_definitions(
         definitions: tuple[ToolDefinition, ...],
@@ -835,6 +948,7 @@ class McpAdmissionRuntime(ToolRuntime):
                 ),
                 requires_approval=definition.requires_approval,
                 requires_sanitization=definition.requires_sanitization,
+                mandatory_approval=definition.mandatory_approval,
                 metadata=_normalize_json_value(
                     definition.metadata,
                     path="metadata",

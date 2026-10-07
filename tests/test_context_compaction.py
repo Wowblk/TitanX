@@ -29,7 +29,7 @@ from titanx.types import (
     UserMessage,
 )
 
-from ._helpers import NullTools, ScriptedLlm, SingleTool
+from ._helpers import NullTools, ScriptedLlm, SingleTool, authorizing_policy_store
 
 
 class RecordingStrategy(CompactionStrategy):
@@ -55,8 +55,13 @@ def make_compacting_runtime(
     llm, strategy, *, budget=2500, tools=None, options=None, auto_approve_tools=True, **kwargs,
 ):
     events = []
+    runtime_tools = tools or NullTools()
+    kwargs.setdefault(
+        "policy_store",
+        authorizing_policy_store(runtime_tools, auto_approve_tools=auto_approve_tools),
+    )
     runtime = AgentRuntime(
-        llm=llm, tools=tools or NullTools(), safety=SafetyLayer(),
+        llm=llm, tools=runtime_tools, safety=SafetyLayer(),
         compaction_strategy=strategy,
         compaction_options=options or CompactionOptions(token_budget=budget, min_recent_messages=2),
         hooks=RuntimeHooks(on_event=lambda event, config, state: events.append(event)),

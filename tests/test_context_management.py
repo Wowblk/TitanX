@@ -22,7 +22,7 @@ from titanx.types import (
     RuntimeHooks, ToolCall, ToolDefinition, ToolExecutionResult,
     ToolMessage, UserMessage,
 )
-from ._helpers import NullTools, SingleTool
+from ._helpers import NullTools, SingleTool, authorizing_policy_store
 from .test_context_compaction import RecordingLlm, RecordingStrategy, assert_complete_tool_groups
 
 
@@ -35,8 +35,10 @@ async def store(tmp_path):
 
 def runtime_with_store(store, llm, *, tools=None, strategy=None, options=None, context=None, **kwargs):
     events = []
+    runtime_tools = tools or NullTools()
+    kwargs.setdefault("policy_store", authorizing_policy_store(runtime_tools, include_context=True))
     runtime = AgentRuntime(
-        llm, tools or NullTools(), SafetyLayer(),
+        llm, runtime_tools, SafetyLayer(),
         context_options=context or ContextOptions(store, offload_threshold_chars=1500, preview_chars=150),
         compaction_options=options or CompactionOptions(12000, target_token_budget=7000),
         compaction_strategy=strategy or RecordingStrategy(),
@@ -574,9 +576,11 @@ async def test_offload_preserves_wrapper_and_only_archives_inspected_output(stor
             return ToolOutputSafetyResult("safe content " * 400, [], False)
     llm = RecordingLlm([LlmTurnResult(type="tool_calls", tool_calls=[ToolCall("a", "logs", {})]),
                         LlmTurnResult(type="text", text="done")])
-    runtime = AgentRuntime(llm, SingleTool(ToolDefinition("logs", "", {}), execute), InspectingSafety(),
+    tools = SingleTool(ToolDefinition("logs", "", {}), execute)
+    runtime = AgentRuntime(llm, tools, InspectingSafety(),
                            context_options=ContextOptions(store, offload_threshold_chars=2000, preview_chars=50),
-                           wrap_tool_output=True)
+                           wrap_tool_output=True,
+                           policy_store=authorizing_policy_store(tools, include_context=True))
     await runtime.run_prompt("read")
     message = next(m for m in runtime.state.messages if isinstance(m, ToolMessage))
     assert message.content.startswith('<tool_output tool="logs" trust="untrusted">')

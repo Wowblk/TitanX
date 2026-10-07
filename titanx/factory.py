@@ -175,11 +175,19 @@ def _resolve_policy_store(options: CreateSandboxedRuntimeOptions) -> PolicyStore
     """
     if options.policy_store is not None:
         return options.policy_store
+    # When context management is on, the runtime injects the read-only context
+    # tools; the default policy must authorise them or deny-by-default would
+    # silently disable archive recall. Host/sandbox tools stay opt-in.
+    tool_allowlist: list[str] = []
+    if options.context_options is not None:
+        from .context.manager import CONTEXT_TOOL_NAMES
+        tool_allowlist = sorted(CONTEXT_TOOL_NAMES)
     return PolicyStore(
         AgentPolicy(
             allowed_write_paths=list(options.allowed_write_paths or []),
             auto_approve_tools=options.auto_approve_tools,
             max_iterations=options.max_iterations,
+            tool_allowlist=tool_allowlist,
         ),
         AuditLog(),
     )

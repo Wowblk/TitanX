@@ -70,12 +70,15 @@ class PolicyStore(ReadonlyPolicyView):
     ) -> PolicyCheckResult:
         """Return the policy decision for a single tool call.
 
-        Decision precedence (most restrictive wins):
-          1. Tool is on the denylist                         -> deny
-          2. Tool is unknown to the runtime                  -> deny
-          3. Tool definition has ``requires_approval=True``  -> needs_approval
-             (unless ``auto_approve_tools`` is enabled, in which case allow)
-          4. Otherwise                                       -> allow
+        Decision precedence (most restrictive wins, TXS-02 deny-by-default):
+          1. Tool is on the denylist                             -> deny
+          2. Tool is unknown to the runtime                      -> deny
+          3. Tool requires approval and is ``mandatory_approval`` -> needs_approval
+             (``auto_approve_tools`` is deliberately skipped)
+          4. Tool requires approval, ``auto_approve_tools`` off  -> needs_approval
+          5. Tool requires approval, ``auto_approve_tools`` on   -> allow
+          6. Tool does not require approval and is allowlisted    -> allow
+          7. Otherwise (registered, no approval, not allowlisted) -> deny
         """
         policy = self._current
 
@@ -91,22 +94,68 @@ class PolicyStore(ReadonlyPolicyView):
                 reason=f"tool '{tool_call.name}' is not registered with the runtime",
             )
 
-        if tool_definition.requires_approval and not policy.auto_approve_tools:
+        if tool_definition.requires_approval:
+            if tool_definition.mandatory_approval:
+                return PolicyCheckResult(
+                    decision="needs_approval",
+                    reason=(
+                        f"tool '{tool_call.name}' mandates approval and cannot be "
+                        "auto-approved"
+                    ),
+                )
+            if policy.auto_approve_tools:
+                return PolicyCheckResult(
+                    decision="allow",
+                    reason=f"auto_approve_tools enabled; '{tool_call.name}' allowed without prompt",
+                )
             return PolicyCheckResult(
                 decision="needs_approval",
                 reason=f"tool '{tool_call.name}' requires explicit human approval",
             )
 
-        if tool_definition.requires_approval and policy.auto_approve_tools:
+        # Registration is not authorisation: a non-approval tool must be
+        # explicitly allowlisted before it is dispatched.
+        if tool_call.name in policy.tool_allowlist:
             return PolicyCheckResult(
                 decision="allow",
-                reason=f"auto_approve_tools enabled; '{tool_call.name}' allowed without prompt",
+                reason=f"tool '{tool_call.name}' is on the policy allowlist",
             )
 
         return PolicyCheckResult(
-            decision="allow",
-            reason=f"tool '{tool_call.name}' has no approval requirement",
+            decision="deny",
+            reason=(
+                f"tool '{tool_call.name}' does not require approval but is not on "
+                "the policy allowlist"
+            ),
         )
+
+    async def allow_tools(
+        self,
+        names: list[str] | tuple[str, ...],
+        reason: str,
+        actor: str = "host",
+    ) -> None:
+        """Explicitly permit non-approval tools on the live policy.
+
+        Deny-by-default means registration alone never authorises dispatch; the
+        host (or an admission plane acting on its behalf) must widen the
+        allowlist. Routing through :meth:`set` keeps every widening validated,
+        snapshotted, epoch-bumped, and audited — mutating ``_current`` directly
+        would create an unaudited authorisation change.
+
+        Idempotent: when every requested name is already allowlisted no policy
+        change is produced.
+        """
+        merged = list(self._current.tool_allowlist)
+        for name in names:
+            if name not in merged:
+                merged.append(name)
+        if merged == self._current.tool_allowlist:
+            return
+        updated = copy.deepcopy(self._current)
+        updated.tool_allowlist = merged
+        await self.set(updated, reason, actor=actor)
+
 
     async def set(
         self,

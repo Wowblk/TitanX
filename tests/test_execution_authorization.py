@@ -17,7 +17,7 @@ from titanx.types import (
     LlmTurnResult, RuntimeHooks, ToolCall, ToolDefinition, ToolExecutionResult,
     ToolMessage, ToolRuntime,
 )
-from ._helpers import ScriptedLlm
+from ._helpers import ScriptedLlm, authorizing_policy_store
 
 
 SCHEMA = {
@@ -56,6 +56,10 @@ class NoteTools(ToolRuntime):
 
 def rig(*, tools=None, calls=None, turns=None, store=None, hooks=None, options=None):
     tools = tools or NoteTools()
+    if store is None:
+        # Deny-by-default: a host that hands an in-process tool to the runtime
+        # must authorise it. Tests whose subject is not the allowlist seed it.
+        store = authorizing_policy_store(tools)
     calls = calls if calls is not None else [ToolCall("call-note", "write_note", copy.deepcopy(ARGS))]
     llm = ScriptedLlm(turns or [
         LlmTurnResult(type="tool_calls", tool_calls=calls),
@@ -227,7 +231,7 @@ async def test_final_admission_rechecks_policy_after_awaited_audit():
             changed = True
             await store.set(AgentPolicy(tool_denylist=["write_note"]), "revoke test operation")
 
-    store = PolicyStore(AgentPolicy(), AuditLog(secondary_sink=observer))
+    store = PolicyStore(AgentPolicy(tool_allowlist=["write_note"]), AuditLog(secondary_sink=observer))
     runtime, tools, _ = rig(tools=NoteTools(requires_approval=False), store=store)
     await runtime.run_prompt("test final authorization")
     assert changed and tools.calls == []
@@ -241,7 +245,7 @@ async def test_final_admission_rechecks_arguments_after_observer():
         if entry.event == "tool_decision" and entry.decision == "allow":
             runtime.state.pending_tool_calls[0].args["note"]["text"] = "changed before dispatch"
 
-    store = PolicyStore(AgentPolicy(), AuditLog(secondary_sink=observer))
+    store = PolicyStore(AgentPolicy(tool_allowlist=["write_note"]), AuditLog(secondary_sink=observer))
     runtime, tools, _ = rig(tools=NoteTools(requires_approval=False), store=store)
     await runtime.run_prompt("test operation binding")
     assert tools.calls == []
@@ -321,7 +325,7 @@ async def test_overlapping_resume_and_new_prompt_do_not_start_another_runner():
 def test_intent_is_immutable_and_admission_is_one_use():
     tools = NoteTools(requires_approval=False)
     config = create_config(available_tools=tools.list_tools())
-    guard = ExecutionGuard(PolicyStore(AgentPolicy()), tools.list_tools())
+    guard = ExecutionGuard(PolicyStore(AgentPolicy(tool_allowlist=["write_note"])), tools.list_tools())
     guard.start_run(config)
     call = ToolCall("unit-note", "write_note", copy.deepcopy(ARGS))
     intent = guard.prepare(call, 0, config, tools.list_tools())
