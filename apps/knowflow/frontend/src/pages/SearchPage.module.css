@@ -1,0 +1,112 @@
+.searchArea {
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+  padding: 24px 28px;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 28px;
+  box-shadow: 0 18px 42px rgba(26, 26, 44, 0.06);
+}
+
+.history {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.historyItem {
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(21, 154, 140, 0.22);
+  color: var(--color-text-strong);
+  font-weight: 500;
+}
+
+.suggestions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 18px;
+}
+
+.suggestionCard {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 14px 32px rgba(32, 47, 68, 0.08);
+  font-weight: 600;
+  font-size: 16px;
+  color: var(--color-text-strong);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.suggestionCard:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 18px 42px rgba(13, 118, 109, 0.14);
+}
+
+/* 搜索页新增布局 */
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.controlInput {
+  height: 34px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(0,0,0,0.08);
+}
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.resultItem {
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 12px 28px rgba(32, 47, 68, 0.06);
+}
+
+.resultTitle {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--color-text-strong);
+}
+
+.snippet {
+  margin-top: 8px;
+  color: var(--color-text);
+}
+.snippet em {
+  background: rgba(244, 168, 60, 0.18);
+  border-radius: 4px;
+  padding: 0 2px;
+}
+
+.loadMoreBtn {
+  align-self: center;
+  border: none;
+  border-radius: 999px;
+  padding: 10px 16px;
+  background: var(--color-primary);
+  color: #fff;
+  cursor: pointer;
+}
+
+.loginHint {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(244, 168, 60, 0.12);
+  color: #8a5a00;
+  font-size: 13px;
+}

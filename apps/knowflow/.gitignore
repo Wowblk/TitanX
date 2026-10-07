@@ -1,0 +1,43 @@
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Logs and local runtime data
+*.log
+logs/
+data/
+uploads/
+*.jtl
+gateway/.pids/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+backend/config/keys/
+gateway/config/local*.yaml
+
+# Java / Maven
+backend/target/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Go
+.gocache/
+gateway/bin/
+gateway/coverage.out
+
+# Python
+titanx-agent/.venv/
+titanx-agent/__pycache__/
+titanx-agent/.pytest_cache/
+titanx-agent/.mypy_cache/
+titanx-agent/*.egg-info/
+**/__pycache__/
+*.pyc

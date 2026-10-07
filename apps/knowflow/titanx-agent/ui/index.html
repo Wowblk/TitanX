@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TitanX Gateway</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a;
+    --accent: #6366f1; --accent-dim: #4f52cc;
+    --text: #e2e8f0; --muted: #64748b; --error: #f87171; --success: #4ade80;
+    --font: system-ui, -apple-system, sans-serif; --mono: 'Fira Code', monospace;
+  }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); display: flex; height: 100vh; overflow: hidden; }
+
+  /* Sidebar */
+  #sidebar { width: 220px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 16px 0; flex-shrink: 0; }
+  #logo { padding: 0 16px 20px; font-size: 18px; font-weight: 700; color: var(--accent); letter-spacing: -0.5px; }
+  .nav-item { padding: 10px 16px; cursor: pointer; border-radius: 6px; margin: 2px 8px; font-size: 14px; color: var(--muted); transition: all 0.15s; display: flex; align-items: center; gap: 8px; }
+  .nav-item:hover { background: var(--border); color: var(--text); }
+  .nav-item.active { background: var(--accent); color: #fff; }
+  #session-box { margin: auto 8px 0; padding: 12px; background: var(--bg); border-radius: 8px; border: 1px solid var(--border); }
+  #session-box label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 4px; }
+  #session-input { width: 100%; background: transparent; border: none; color: var(--text); font-size: 12px; font-family: var(--mono); outline: none; }
+
+  /* Main */
+  #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .view { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+  .view.active { display: flex; }
+  .view-header { padding: 16px 24px; border-bottom: 1px solid var(--border); font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 12px; }
+  .view-body { flex: 1; overflow-y: auto; padding: 20px 24px; }
+
+  /* Chat */
+  #messages { display: flex; flex-direction: column; gap: 12px; padding-bottom: 8px; }
+  .msg { max-width: 80%; padding: 10px 14px; border-radius: 10px; font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 3px; }
+  .msg.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 3px; }
+  .msg.tool { align-self: flex-start; background: #1e2a1e; border: 1px solid #2d4a2d; font-family: var(--mono); font-size: 12px; color: var(--success); max-width: 90%; }
+  .msg.error { border-color: var(--error); color: var(--error); }
+  .msg.system { align-self: center; background: transparent; color: var(--muted); font-size: 12px; font-style: italic; }
+  .approval-banner { background: #2a1f0a; border: 1px solid #a16207; border-radius: 8px; padding: 12px 16px; display: flex; align-items: center; gap: 12px; font-size: 13px; }
+  #approval-banner { display: none; }
+  #approve-btn { padding: 6px 14px; background: #a16207; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  #approve-btn:hover { background: #ca8a04; }
+  #chat-input-area { border-top: 1px solid var(--border); padding: 16px 24px; display: flex; gap: 10px; }
+  #chat-input { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; color: var(--text); font-size: 14px; font-family: var(--font); resize: none; outline: none; max-height: 120px; }
+  #chat-input:focus { border-color: var(--accent); }
+  #send-btn { padding: 10px 20px; background: var(--accent); color: #fff; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 500; }
+  #send-btn:hover { background: var(--accent-dim); }
+  #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* Memory */
+  #memory-search { display: flex; gap: 10px; margin-bottom: 20px; }
+  #memory-query { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; color: var(--text); font-size: 14px; outline: none; }
+  #memory-query:focus { border-color: var(--accent); }
+  .search-btn { padding: 10px 20px; background: var(--accent); color: #fff; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; }
+  .memory-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 10px; }
+  .memory-card .meta { font-size: 11px; color: var(--muted); margin-bottom: 6px; display: flex; gap: 12px; }
+  .memory-card .content { font-size: 13px; line-height: 1.6; }
+  .badge { padding: 2px 8px; border-radius: 99px; font-size: 10px; font-weight: 600; text-transform: uppercase; }
+  .badge.vector { background: #1e1b4b; color: #a5b4fc; }
+  .badge.fts { background: #172554; color: #93c5fd; }
+  .badge.hybrid { background: #1a2e1a; color: #86efac; }
+
+  /* Jobs */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); color: var(--muted); font-weight: 500; }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .status { padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 600; }
+  .status.pending { background: #1c1a0a; color: #fbbf24; }
+  .status.running { background: #0a1c1a; color: #34d399; }
+  .status.completed { background: #0a1a0a; color: #4ade80; }
+  .status.failed { background: #1a0a0a; color: var(--error); }
+
+  /* Logs */
+  .log-entry { display: grid; grid-template-columns: 160px 120px 80px 1fr; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; font-family: var(--mono); align-items: start; }
+  .log-entry .ts { color: var(--muted); }
+  .log-entry .event { color: var(--accent); }
+  .log-entry .actor { color: var(--muted); }
+  .log-entry .data { color: var(--text); word-break: break-all; }
+  .empty { color: var(--muted); font-size: 14px; text-align: center; padding: 40px; }
+  .refresh-btn { padding: 6px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--text); cursor: pointer; font-size: 13px; margin-left: auto; }
+  .refresh-btn:hover { border-color: var(--accent); }
+</style>
+</head>
+<body>
+
+<nav id="sidebar">
+  <div id="logo">⚡ TitanX</div>
+  <div class="nav-item active" data-view="chat">💬 Chat</div>
+  <div class="nav-item" data-view="memory">🧠 Memory</div>
+  <div class="nav-item" data-view="jobs">⚙️ Jobs</div>
+  <div class="nav-item" data-view="logs">📋 Logs</div>
+  <div id="session-box">
+    <label>Session ID</label>
+    <input id="session-input" type="text" spellcheck="false" />
+  </div>
+</nav>
+
+<div id="main">
+
+  <!-- Chat -->
+  <div class="view active" id="view-chat">
+    <div class="view-header">Chat</div>
+    <div class="view-body" id="chat-body">
+      <div id="messages"></div>
+    </div>
+    <div id="approval-banner" class="approval-banner">
+      <span>⚠️ Tool approval required</span>
+      <button id="approve-btn">Approve</button>
+    </div>
+    <div id="chat-input-area">
+      <textarea id="chat-input" rows="1" placeholder="Type a message… (Enter to send, Shift+Enter for newline)"></textarea>
+      <button id="send-btn">Send</button>
+    </div>
+  </div>
+
+  <!-- Memory -->
+  <div class="view" id="view-memory">
+    <div class="view-header">Memory <button class="refresh-btn" id="memory-refresh">Refresh</button></div>
+    <div class="view-body">
+      <div id="memory-search">
+        <input id="memory-query" type="text" placeholder="Search memory…" />
+        <button class="search-btn" id="memory-search-btn">Search</button>
+      </div>
+      <div id="memory-results"></div>
+    </div>
+  </div>
+
+  <!-- Jobs -->
+  <div class="view" id="view-jobs">
+    <div class="view-header">Jobs <button class="refresh-btn" id="jobs-refresh">Refresh</button></div>
+    <div class="view-body">
+      <table>
+        <thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Created</th></tr></thead>
+        <tbody id="jobs-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Logs -->
+  <div class="view" id="view-logs">
+    <div class="view-header">Audit Logs <button class="refresh-btn" id="logs-refresh">Refresh</button></div>
+    <div class="view-body">
+      <div id="logs-list"></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const BASE = "";
+let sessionId = "session-" + Math.random().toString(36).slice(2, 8);
+document.getElementById("session-input").value = sessionId;
+document.getElementById("session-input").addEventListener("change", (e) => {
+  sessionId = e.target.value.trim() || sessionId;
+});
+
+// Nav
+document.querySelectorAll(".nav-item").forEach((item) => {
+  item.addEventListener("click", () => {
+    document.querySelectorAll(".nav-item").forEach((n) => n.classList.remove("active"));
+    document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
+    item.classList.add("active");
+    document.getElementById("view-" + item.dataset.view).classList.add("active");
+    if (item.dataset.view === "memory") loadMemory();
+    if (item.dataset.view === "jobs") loadJobs();
+    if (item.dataset.view === "logs") loadLogs();
+  });
+});
+
+// ── Chat ──────────────────────────────────────────────────────────────────
+const messagesEl = document.getElementById("messages");
+const chatInput = document.getElementById("chat-input");
+const sendBtn = document.getElementById("send-btn");
+const approvalBanner = document.getElementById("approval-banner");
+const approveBtn = document.getElementById("approve-btn");
+let streaming = false;
+let currentAssistantEl = null;
+
+function addMsg(role, text) {
+  const el = document.createElement("div");
+  el.className = "msg " + role;
+  el.textContent = text;
+  messagesEl.appendChild(el);
+  el.scrollIntoView({ behavior: "smooth" });
+  return el;
+}
+
+chatInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+sendBtn.addEventListener("click", sendMessage);
+
+async function sendMessage() {
+  const text = chatInput.value.trim();
+  if (!text || streaming) return;
+  chatInput.value = "";
+  addMsg("user", text);
+  streaming = true;
+  sendBtn.disabled = true;
+  currentAssistantEl = null;
+
+  const res = await fetch(BASE + "/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId, message: text }),
+  });
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith("data:")) continue;
+      try {
+        const event = JSON.parse(line.slice(5).trim());
+        handleEvent(event);
+      } catch {}
+    }
+  }
+
+  streaming = false;
+  sendBtn.disabled = false;
+}
+
+function handleEvent(event) {
+  if (event.type === "assistant_text") {
+    if (!currentAssistantEl) currentAssistantEl = addMsg("assistant", "");
+    currentAssistantEl.textContent += event.text;
+    currentAssistantEl.scrollIntoView({ behavior: "smooth" });
+  } else if (event.type === "tool_result") {
+    const status = event.isError ? "❌" : "✅";
+    addMsg("tool", status + " " + event.toolName + (event.isError ? " (error)" : ""));
+  } else if (event.type === "pending_approval") {
+    approvalBanner.style.display = "flex";
+  } else if (event.type === "loop_end" && event.reason === "completed") {
+    approvalBanner.style.display = "none";
+    currentAssistantEl = null;
+  } else if (event.type === "error") {
+    addMsg("error", "Error: " + event.message);
+  } else if (event.type === "compaction_triggered") {
+    addMsg("system", "✦ Context compressed");
+  }
+}
+
+approveBtn.addEventListener("click", async () => {
+  await fetch(BASE + "/api/chat/approve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId }),
+  });
+  approvalBanner.style.display = "none";
+});
+
+// ── Memory ────────────────────────────────────────────────────────────────
+async function loadMemory(query = "") {
+  const el = document.getElementById("memory-results");
+  el.innerHTML = "<div class='empty'>Loading…</div>";
+  const params = new URLSearchParams({ sessionId });
+  if (query) params.set("q", query);
+  const res = await fetch(BASE + "/api/memory?" + params);
+  if (!res.ok) { el.innerHTML = "<div class='empty'>Storage not configured.</div>"; return; }
+  const data = await res.json();
+  if (!data.length) { el.innerHTML = "<div class='empty'>No memories found.</div>"; return; }
+  el.innerHTML = data.map((m) => `
+    <div class="memory-card">
+      <div class="meta">
+        <span>${new Date(m.createdAt || m.entry?.createdAt).toLocaleString()}</span>
+        <span class="badge ${m.source || (m.entry ? "hybrid" : "fts")}">${m.source || "fts"}</span>
+        ${m.score !== undefined ? `<span>score: ${(m.score || 0).toFixed(3)}</span>` : ""}
+      </div>
+      <div class="content">${escHtml(m.content || m.entry?.content || "")}</div>
+    </div>
+  `).join("");
+}
+
+document.getElementById("memory-search-btn").addEventListener("click", () => {
+  loadMemory(document.getElementById("memory-query").value.trim());
+});
+document.getElementById("memory-query").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") loadMemory(e.target.value.trim());
+});
+document.getElementById("memory-refresh").addEventListener("click", () => loadMemory());
+
+// ── Jobs ──────────────────────────────────────────────────────────────────
+async function loadJobs() {
+  const tbody = document.getElementById("jobs-body");
+  tbody.innerHTML = "<tr><td colspan='4' class='empty'>Loading…</td></tr>";
+  const res = await fetch(BASE + "/api/jobs?sessionId=" + encodeURIComponent(sessionId));
+  if (!res.ok) { tbody.innerHTML = "<tr><td colspan='4' class='empty'>Storage not configured.</td></tr>"; return; }
+  const jobs = await res.json();
+  if (!jobs.length) { tbody.innerHTML = "<tr><td colspan='4' class='empty'>No jobs.</td></tr>"; return; }
+  tbody.innerHTML = jobs.map((j) => `
+    <tr>
+      <td style="font-family:var(--mono);font-size:11px">${j.id.slice(0, 8)}…</td>
+      <td>${escHtml(j.type)}</td>
+      <td><span class="status ${j.status}">${j.status}</span></td>
+      <td>${new Date(j.createdAt).toLocaleString()}</td>
+    </tr>
+  `).join("");
+}
+document.getElementById("jobs-refresh").addEventListener("click", loadJobs);
+
+// ── Logs ──────────────────────────────────────────────────────────────────
+async function loadLogs() {
+  const el = document.getElementById("logs-list");
+  el.innerHTML = "<div class='empty'>Loading…</div>";
+  const res = await fetch(BASE + "/api/logs?sessionId=" + encodeURIComponent(sessionId) + "&limit=200");
+  if (!res.ok) { el.innerHTML = "<div class='empty'>Storage not configured.</div>"; return; }
+  const logs = await res.json();
+  if (!logs.length) { el.innerHTML = "<div class='empty'>No logs.</div>"; return; }
+  el.innerHTML = logs.map((l) => `
+    <div class="log-entry">
+      <span class="ts">${new Date(l.timestamp).toLocaleString()}</span>
+      <span class="event">${escHtml(l.event)}</span>
+      <span class="actor">${escHtml(l.actor)}</span>
+      <span class="data">${l.data ? escHtml(JSON.stringify(l.data).slice(0, 200)) : ""}</span>
+    </div>
+  `).join("");
+}
+document.getElementById("logs-refresh").addEventListener("click", loadLogs);
+
+function escHtml(str) {
+  return String(str).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+</script>
+</body>
+</html>

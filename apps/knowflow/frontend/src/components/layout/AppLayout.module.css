@@ -1,0 +1,40 @@
+.container {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.pageCard {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(31, 49, 67, 0.08);
+  border-radius: 20px;
+  padding: 26px;
+  box-shadow: 0 18px 46px rgba(32, 47, 68, 0.06);
+}
+
+@media (max-width: 900px) {
+  .container {
+    gap: 16px;
+  }
+
+  .pageCard {
+    border-radius: 16px;
+    padding: 18px;
+  }
+}

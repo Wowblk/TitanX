@@ -1,0 +1,47 @@
+.badge {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: rgba(255, 199, 143, 0.22);
+  color: var(--color-primary-strong);
+  font-weight: 600;
+  font-size: 14px;
+  box-shadow: inset 0 0 0 1px rgba(21, 154, 140, 0.2);
+}
+
+.avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #ffb36c 0%, #ff9250 100%);
+  color: #fff;
+  font-weight: 700;
+  font-size: 16px;
+  overflow: hidden; /* 头像图片裁剪为圆形 */
+}
+
+.avatarImg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.meta {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.alias {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}

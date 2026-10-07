@@ -1,0 +1,71 @@
+.wrapper {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 18px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: inset 0 0 0 1px rgba(21, 154, 140, 0.2);
+  color: var(--color-text-muted);
+  width: 100%;
+  position: relative;
+}
+
+.input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  outline: none;
+  font-size: 15px;
+  color: var(--color-text-strong);
+}
+
+.input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.button {
+  padding: 10px 20px;
+  border-radius: 999px;
+  background: var(--color-primary-strong);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 24px rgba(13, 118, 109, 0.18);
+}
+
+/* 联想抽屉下拉 */
+.dropdown {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 8px);
+  width: 100%;
+  background: #fff;
+  border-radius: 20px;
+  box-shadow: 0 18px 42px rgba(32, 47, 68, 0.1);
+  padding: 8px 0;
+  max-height: 360px;
+  overflow-y: auto;
+  z-index: 10;
+}
+
+.dropdownItem {
+  padding: 12px 16px;
+  color: var(--color-text-strong);
+  cursor: pointer;
+}
+
+.dropdownItem:hover {
+  background: rgba(26, 26, 44, 0.04);
+}
+
+.dropdownEmpty {
+  padding: 12px 16px;
+  color: var(--color-text-muted);
+}

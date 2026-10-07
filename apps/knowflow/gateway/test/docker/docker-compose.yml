@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  mg-consul:
+    image: consul:1.15
+    container_name: mg-consul
+    command: agent -server -bootstrap-expect=1 -ui -client=0.0.0.0 -http-port=8300 -server-port=8754
+    network_mode: host
+    volumes:
+      - mg-consul-data:/consul/data
+    environment:
+      - CONSUL_BIND_INTERFACE=eth0  # 根据实际网卡名称调整
+
+  mg-grafana:
+    image: grafana/grafana:10.2.0
+    container_name: mg-grafana
+    network_mode: host
+    volumes:
+      - mg-grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    environment:
+      - GF_SERVER_HTTP_PORT=8350
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_INSTALL_PLUGINS=grafana-clock-panel
+
+  mg-redis:
+    image: redis:7.0
+    container_name: mg-redis
+    network_mode: host
+    command: redis-server --port 8379 --requirepass redis123
+    volumes:
+      - mg-redis-data:/data
+
+  mg-prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: mg-prometheus
+    network_mode: host
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.listen-address=:8390'
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - mg-prometheus-data:/prometheus
+
+  mg-jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: mg-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "8330:16686"  # Jaeger UI 端口
+      - "8331:4318"   # OTLP HTTP 端口
+    volumes:
+      - mg-jaeger-data:/data
+
+volumes:
+  mg-consul-data:
+  mg-grafana-data:
+  mg-redis-data:
+  mg-prometheus-data:
+  mg-jaeger-data:  # 新增 Jaeger 数据卷

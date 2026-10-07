@@ -1,0 +1,152 @@
+server:
+  port: "8380"
+  ginmode: release
+  pprofenabled: true # 新增：是否启用 pprof 端点
+logger:
+  level: debug
+  filepath: logs/gateway.log
+  maxsize: 100
+  maxbackups: 10
+  maxage: 30
+  compress: true
+middleware:
+  ratelimit: true
+  ipacl: false
+  antiinjection: false
+  auth: false
+  breaker: false
+  tracing: true
+grpc:
+  enabled: true
+  prefix: /grpc
+  healthcheckpath: /grpc/health
+  reflection: false
+  allowedorigins:
+  - '*'
+websocket:
+  enabled: true
+  maxidleconns: 10
+  idletimeout: 5m0s
+  prefix: /websocket
+routing:
+  rules:
+    /api/v1/*path:
+    - target: http://127.0.0.1:8080
+      weight: 100
+      env: stable
+      protocol: http
+      healthcheckpath: /actuator/health
+    /api/v2/hello/*path:
+    - target: 127.0.0.1:8391
+      weight: 100
+      env: ""
+      protocol: grpc
+      healthcheckpath: hello.Health
+    /api/v3/hello:
+    - target: 127.0.0.1:8391
+      weight: 100
+      env: ""
+      protocol: grpc
+      healthcheckpath: hello.Health
+    /ws/chat:
+    - target: ws://127.0.0.1:8392
+      weight: 100
+      env: ""
+      protocol: websocket
+      healthcheckpath: /health
+  engine: gin  # 路由引擎,trie,trie_regexp,regexp,gin
+  loadbalancer: weighted_round_robin # 负载均衡，可选值：round_robin,weighted_round_robin,ketama,consul
+  heartbeatinterval: 30
+  grayscale:
+    enabled: true
+    weightedrandom: false
+    defaultenv: stable
+    canaryenv: canary
+security:
+  authmode: jwt
+  jwt:
+    secret: change-to-your-secret-key
+    expiresin: 7200000
+    enabled: true
+  rbac:
+    enabled: true
+    modelpath: config/data/rbac_model.conf
+    policypath: config/data/rbac_policy.csv
+  ipblacklist:
+  - 192.168.1.100
+  ipwhitelist:
+  - 127.0.0.1
+  - localhost
+  - 10.2.100.111
+  ipupdatemode: override
+cache:
+  addr: 127.0.0.1:6379
+  password: ""
+  db: 0
+caching:
+  enabled: false
+  rules:
+  - path: /api/v1/user
+    method: GET
+    threshold: 100
+    ttl: 5m0s
+  - path: /api/v1/order
+    method: GET
+    threshold: 50
+    ttl: 10m0s
+consul:
+  enabled: false
+  addr: 127.0.0.1:8300
+traffic:
+  ratelimit:
+    enabled: true
+    qps: 100          # 全局限流
+    burst: 300
+    algorithm: leaky_bucket
+    ip_limits:         # IP维度限流
+      "192.168.1.0/24":
+        qps: 500
+        burst: 1500
+        enable: true
+    route_limits:      # 路由维度限流
+      "/api/v1/*path":
+        qps: 800
+        burst: 2000
+        enable: true
+  breaker:
+    enabled: true
+    errorrate: 0.5
+    timeout: 1000
+    minrequests: 20
+    sleepwindow: 5000
+    maxconcurrent: 100
+    windowsize: 100
+    windowduration: 10
+observability:
+  grafana:
+    httpEndpoint: 127.0.0.1:8350/dashboards
+  prometheus:
+    enabled: true
+    path: /metrics
+    httpEndpoint: 127.0.0.1:8390
+  jaeger:
+    enabled: true
+    endpoint: 127.0.0.1:8331
+    httpEndpoint: 127.0.0.1:8330
+    sampler: always
+    sampleratio: 1
+plugin:
+  dir: bin/plugins
+  plugins:
+  - log
+  - ping
+performance:
+  memorypool:
+    enabled: true
+    targetscapacity: 10
+    rulescapacity: 10
+  maxconnsperhost: 512
+  httppoolenabled: true
+fileServer:
+  staticfilepath: ./data
+  enabledfasthttp: false

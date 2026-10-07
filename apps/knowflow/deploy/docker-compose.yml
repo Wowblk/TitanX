@@ -1,0 +1,130 @@
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ../backend/db/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9200 >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: 8080
+      DB_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=utf8
+      DB_USERNAME: ${MYSQL_USER}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      ES_URIS: http://elasticsearch:9200
+      ES_VECTOR_INDEX: knowflow-ai-index
+      ES_VECTOR_INITIALIZE_SCHEMA: "false"
+      KAFKA_LISTENER_AUTO_STARTUP: "false"
+      COUNTER_REBUILD_ENABLED: "false"
+      CANAL_ENABLED: "false"
+      MANAGEMENT_HEALTH_ELASTICSEARCH_ENABLED: "false"
+      MANAGEMENT_HEALTH_KAFKA_ENABLED: "false"
+      JWT_ISSUER: ${JWT_ISSUER}
+      JWT_KEY_ID: ${JWT_KEY_ID}
+      JWT_PRIVATE_KEY: file:/app/config/keys/private.pem
+      JWT_PUBLIC_KEY: file:/app/config/keys/public.pem
+      OSS_MODE: ${OSS_MODE}
+      OSS_LOCAL_ROOT: ${OSS_LOCAL_ROOT}
+      OSS_LOCAL_PUBLIC_PREFIX: ${OSS_LOCAL_PUBLIC_PREFIX}
+      KIMI_API_KEY: ${KIMI_API_KEY}
+      KIMI_BASE_URL: ${KIMI_BASE_URL}
+      KIMI_CHAT_MODEL: ${KIMI_CHAT_MODEL}
+      TITANX_BASE_URL: http://titanx-agent:3000
+    volumes:
+      - ../backend/config/keys:/app/config/keys:ro
+      - backend_uploads:/app/data/uploads
+
+  titanx-agent:
+    build:
+      context: ..
+      dockerfile: titanx-agent/Dockerfile
+    restart: unless-stopped
+    environment:
+      KIMI_API_KEY: ${KIMI_API_KEY}
+      KIMI_BASE_URL: ${KIMI_BASE_URL}
+      KIMI_CHAT_MODEL: ${KIMI_CHAT_MODEL}
+      KNOWFLOW_API_BASE_URL: http://backend:8080
+      TITANX_MAX_ITERATIONS: 8
+    depends_on:
+      - backend
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: gateway/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - gateway
+    ports:
+      - "80:80"
+
+volumes:
+  mysql_data:
+  redis_data:
+  es_data:
+  backend_uploads:
+

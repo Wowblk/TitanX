@@ -1,0 +1,46 @@
+syntax = "proto3";
+package hello;
+option go_package = "./proto";
+
+import "google/api/annotations.proto";
+import "grpc/health/v1/health.proto"; // 引入 gRPC 健康检查协议
+
+// HelloService 定义服务
+service HelloService {
+  rpc SayHello (HelloRequest) returns (HelloResponse) {
+    option (google.api.http) = {
+      post: "/api/v2/hello"
+      body: "*"
+    };
+  }
+
+  rpc GetHello (HelloRequest) returns (HelloResponse) {
+    option (google.api.http) = {
+      get: "/api/v2/hello"
+    };
+  }
+
+  rpc ReplyHello (HelloRequest) returns (HelloResponse) {
+    option (google.api.http) = {
+      get: "/api/v3/hello"
+    };
+  }
+}
+
+// 添加标准健康检查服务
+service Health {
+  rpc Check (grpc.health.v1.HealthCheckRequest) returns (grpc.health.v1.HealthCheckResponse) {
+    // 可选：添加 HTTP 映射
+    option (google.api.http) = {
+      get: "/health"
+    };
+  }
+}
+
+message HelloRequest {
+  string name = 1;
+}
+
+message HelloResponse {
+  string message = 1;
+}

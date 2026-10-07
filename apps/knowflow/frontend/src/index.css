@@ -1,0 +1,135 @@
+:root {
+  color-scheme: only light;
+  font-family: "PingFang SC", "HarmonyOS", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  --color-primary: #159a8c;
+  --color-primary-strong: #0d766d;
+  --color-secondary: #d9f3ee;
+  --color-accent: #f4a83c;
+  --color-success: #12a574;
+  --color-info: #3b73d9;
+  --color-danger: #e34b4b;
+  --color-text-strong: #17202e;
+  --color-text: #384255;
+  --color-text-muted: #758093;
+  --color-border: rgba(31, 49, 67, 0.1);
+  --color-bg: #f5f7f4;
+  --color-surface: #ffffff;
+  --color-surface-soft: #eef6f3;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --shadow-soft: 0 14px 36px rgba(13, 118, 109, 0.14);
+  --shadow-card: 0 16px 42px rgba(32, 47, 68, 0.08);
+  --sidebar-width: 112px;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  min-height: 100%;
+  background:
+    radial-gradient(circle at 12% 12%, rgba(21, 154, 140, 0.12), transparent 32%),
+    radial-gradient(circle at 88% 0%, rgba(244, 168, 60, 0.12), transparent 28%),
+    linear-gradient(180deg, #fbfcf8 0%, #eef5f1 100%);
+}
+
+body {
+  margin: 0;
+  display: flex;
+  justify-content: center;
+  background-attachment: fixed;
+}
+
+#root {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  margin: 0;
+  font-weight: 600;
+  color: var(--color-text-strong);
+}
+
+p {
+  margin: 0;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.app-shell {
+  width: min(1440px, 100%);
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: var(--sidebar-width) 1fr;
+  gap: 22px;
+  padding: 22px 28px 32px;
+}
+
+.ghost-button {
+  padding: 10px 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(21, 154, 140, 0.24);
+  background: rgba(255, 255, 255, 0.76);
+  color: var(--color-primary-strong);
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.ghost-button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 24px rgba(13, 118, 109, 0.16);
+}
+
+@media (max-width: 1200px) {
+  :root {
+    --sidebar-width: 88px;
+  }
+
+  .app-shell {
+    padding: 16px 20px 24px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .app-shell {
+    grid-template-columns: 72px 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+    padding: 12px;
+  }
+}

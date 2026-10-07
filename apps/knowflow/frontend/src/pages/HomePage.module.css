@@ -1,0 +1,47 @@
+.heroRow {
+  margin-bottom: 24px;
+}
+
+.masonry {
+  column-count: 4;
+  column-gap: 20px;
+}
+
+.masonryItem {
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  margin-bottom: 20px;
+  /* 保持卡片宽度由列宽决定，不额外增加内边距 */
+}
+
+.stateCard {
+  padding: 22px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(31, 49, 67, 0.08);
+  color: var(--color-text-muted);
+  box-shadow: var(--shadow-card);
+}
+
+.heroCard {
+  /* 作为顶部大卡展示，宽度占可用区域 */
+  width: 100%;
+}
+
+@media (max-width: 1200px) {
+  .masonry {
+    column-count: 3;
+  }
+}
+
+@media (max-width: 1000px) {
+  .masonry {
+    column-count: 2;
+  }
+}
+
+@media (max-width: 700px) {
+  .masonry {
+    column-count: 1;
+  }
+}
