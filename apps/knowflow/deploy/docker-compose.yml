@@ -91,9 +91,11 @@ services:
       - backend_uploads:/app/data/uploads
 
   titanx-agent:
+    # Built from the monorepo root: the agent depends on the SDK source in
+    # titanx/, which is no longer vendored under titanx-agent/.
     build:
-      context: ..
-      dockerfile: titanx-agent/Dockerfile
+      context: ../../..
+      dockerfile: apps/knowflow/titanx-agent/Dockerfile
     restart: unless-stopped
     environment:
       KIMI_API_KEY: ${KIMI_API_KEY}
