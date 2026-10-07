@@ -123,16 +123,22 @@ class AgentRuntime:
                     count = counter(config, messages) if counter else None
                     return estimate_input_tokens(config, messages) if count is None else count
                 self._compaction_options = replace(compaction_options, token_estimator=count_current_input)
+        # One owner for wholesale transcript replacement, shared by offload
+        # (ContextManager) and compaction so neither can silently violate the
+        # pinned-message / single-summary / tool-group invariants.
+        from .context.transcript import Transcript
+        self._transcript = Transcript(self.config)
         self._context_manager = None
         if context_options is not None:
             from .context.manager import ContextManager
-            self._context_manager = ContextManager(context_options, self.config)
+            self._context_manager = ContextManager(context_options, self.config, transcript=self._transcript)
             if compaction_options is not None and compaction_strategy is None:
                 from .context.summary import LlmCompactionStrategy
                 self._compaction_strategy = LlmCompactionStrategy(llm)
         self._compaction_tracking = CompactionTracking()
         self._context_stop_reason: str | None = None
         self._context_completion_pending = False
+        self._closed = False
 
         self._approval_event: asyncio.Event = asyncio.Event()
         # ``reject_pending_tool`` intentionally stays synchronous for host/UI
@@ -142,6 +148,50 @@ class AgentRuntime:
         self._pending_host_rejections: list[tuple[str, str, str]] = []
 
     # ── Public API ────────────────────────────────────────────────────────────
+
+    @property
+    def transcript(self):
+        """The single owner of wholesale transcript replacement."""
+        return self._transcript
+
+    async def aclose(self) -> None:
+        """Tear down this runtime's session-scoped resources.
+
+        Idempotent and never raises. Flushes the transcript owner with a final
+        archive when context management is enabled, tears down the tool layer
+        (sandbox sessions) when it supports it, and deletes this session's rows
+        from the context store so evicted sessions cannot leak on disk.
+        """
+        if self._closed:
+            return
+        self._closed = True
+
+        if self._context_manager is not None:
+            try:
+                await self._context_manager.archive(self.state)
+            except Exception:
+                pass
+        try:
+            await self._transcript.aclose()
+        except Exception:
+            pass
+
+        closer = getattr(self._tools, "aclose", None)
+        if closer is not None:
+            try:
+                result = closer()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                pass
+
+        store = self._context_manager.options.store if self._context_manager is not None else None
+        delete_session = getattr(store, "delete_session", None)
+        if delete_session is not None:
+            try:
+                await delete_session(self.config.session_id)
+            except Exception:
+                pass
 
     def set_task(
         self, objective: str, *, constraints=(), acceptance_criteria=(), new_task: bool = False,
@@ -724,6 +774,7 @@ class AgentRuntime:
             config=self.config,
             store=self._context_manager.options.store if self._context_manager else None,
             store_timeout_seconds=self._context_manager.options.storage_timeout_seconds if self._context_manager else 10.0,
+            transcript=self._transcript,
         )
         self._compaction_tracking = compact.tracking
 

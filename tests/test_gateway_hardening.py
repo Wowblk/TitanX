@@ -33,6 +33,10 @@ class TestApiKeyComparison:
 class _FakeRuntime:
     def __init__(self, sid: str) -> None:
         self.sid = sid
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 async def _create_runtime(sid: str, hooks: RuntimeHooks) -> _FakeRuntime:
@@ -136,3 +140,37 @@ class TestSessionRegistryBounds:
             await registry.get_or_create(
                 "new", _create_runtime, RuntimeHooks()  # type: ignore[arg-type]
             )
+
+
+class TestSessionRegistryTeardown:
+    """Eviction must tear down the evicted runtime, not just drop the dict row."""
+
+    async def test_lru_eviction_tears_down_evicted_runtime(self) -> None:
+        registry = SessionRegistry(max_sessions=1, idle_ttl_seconds=60.0)
+        first = await registry.get_or_create("a", _create_runtime, RuntimeHooks())  # type: ignore[arg-type]
+        await registry.get_or_create("b", _create_runtime, RuntimeHooks())  # type: ignore[arg-type]
+        assert first.runtime.closed is True
+
+    async def test_idle_sweep_tears_down_evicted_runtime(self) -> None:
+        registry = SessionRegistry(max_sessions=10, idle_ttl_seconds=0.01)
+        entry = await registry.get_or_create("a", _create_runtime, RuntimeHooks())  # type: ignore[arg-type]
+        entry.last_used = 0.0
+        await registry.get_or_create("b", _create_runtime, RuntimeHooks())  # type: ignore[arg-type]
+        assert entry.runtime.closed is True
+
+    async def test_remove_tears_down_runtime(self) -> None:
+        registry = SessionRegistry(max_sessions=10, idle_ttl_seconds=60.0)
+        entry = await registry.get_or_create("a", _create_runtime, RuntimeHooks())  # type: ignore[arg-type]
+        registry.remove("a")
+        await asyncio.sleep(0.01)
+        assert entry.runtime.closed is True
+
+    async def test_aclose_tears_down_every_session(self) -> None:
+        registry = SessionRegistry(max_sessions=10, idle_ttl_seconds=60.0)
+        entries = [
+            await registry.get_or_create(sid, _create_runtime, RuntimeHooks())  # type: ignore[arg-type]
+            for sid in ("a", "b", "c")
+        ]
+        await registry.aclose()
+        assert len(registry) == 0
+        assert all(entry.runtime.closed for entry in entries)
