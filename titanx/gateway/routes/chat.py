@@ -20,13 +20,13 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import hmac
 import json
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ..server import _check_api_key
 from ..session_registry import SessionCapacityError, SessionRegistry
 from ..types import GatewayOptions, SessionEntry
 from ...types import AgentConfig, AgentState, RuntimeEvent, RuntimeHooks
@@ -37,14 +37,6 @@ _MAX_REJECTION_REASON_LENGTH = 2_000
 
 def _event_to_dict(event: RuntimeEvent) -> dict[str, Any]:
     return dataclasses.asdict(event) if dataclasses.is_dataclass(event) else {"type": str(event)}
-
-
-def _check_api_key(provided: str | None, expected: str | None) -> bool:
-    if not expected:
-        return True
-    if not provided:
-        return False
-    return hmac.compare_digest(provided, expected)
 
 
 def _approval_fields(

@@ -27,43 +27,45 @@ import hmac
 import os
 import sys
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from .types import GatewayOptions
 from .session_registry import SessionRegistry
-from .routes import chat_router, jobs_router, logs_router, memory_router
 
 
-def _check_api_key(provided: str | None, expected: str) -> bool:
-    """Constant-time API-key comparison.
+def _check_api_key(provided: str | None, expected: str | None) -> bool:
+    """The single, canonical API-key check for HTTP **and** WS.
+
+    Semantics (documented here once so the file, the middleware and the
+    WS handler cannot drift apart again):
+
+    - ``expected`` is falsy (``None`` or ``""``) -> no key is configured
+      -> the gateway is open -> allow (``True``). Every call site gates
+      on ``if options.api_key:``, so an empty key must mean "open" here
+      too or the helper would disagree with the gateway it protects.
+    - a key *is* configured -> require a non-empty ``provided`` that
+      matches ``expected``.
 
     ``hmac.compare_digest`` is the canonical defence against timing
     attacks that recover a secret one byte at a time. ``==`` returns as
     soon as it finds the first mismatching byte, which leaks the prefix
     length the attacker has already guessed correctly.
     """
+    if not expected:
+        return True
     if not provided:
         return False
     return hmac.compare_digest(provided, expected)
 
 
-def require_api_key(request: Request, options: GatewayOptions) -> None:
-    """Single auth gate used by HTTP routes AND WS handlers.
-
-    Raising ``HTTPException`` short-circuits FastAPI's response
-    pipeline; for WS we do the same check inline before
-    ``websocket.accept()``.
-    """
-    if not options.api_key:
-        return
-    provided = request.headers.get("x-api-key")
-    if not _check_api_key(provided, options.api_key):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthorized")
-
-
 def create_gateway(options: GatewayOptions) -> FastAPI:
+    # Imported here rather than at module scope: ``routes.chat`` imports
+    # this module's ``_check_api_key``, so a top-level import would form a
+    # cycle the moment ``titanx.gateway.routes.chat`` is imported first.
+    from .routes import chat_router, jobs_router, logs_router, memory_router
+
     if not options.api_key:
         # Loud, single-line, stderr-only — ``logging`` hasn't been
         # configured yet at this point, and we want this visible even
