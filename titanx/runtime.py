@@ -34,7 +34,6 @@ from .types import (
     LlmAdapter,
     LoopEndEvent,
     LoopStartEvent,
-    PendingApproval,
     RuntimeEvent,
     RuntimeHooks,
     SafetyLayerLike,
@@ -162,6 +161,8 @@ class AgentRuntime:
         # commit → event). ``config`` and ``safety`` are read live rather than
         # snapshotted: a host may replace ``runtime.config`` to change the
         # execution identity between calls, and the guard must see the new one.
+        # The other collaborators are bound once — the runtime never rebinds
+        # them after construction.
         self._tool_pipeline = ToolCallPipeline(
             config=lambda: self.config,
             safety=lambda: self._safety,
@@ -354,7 +355,6 @@ class AgentRuntime:
         if self._context_manager and self._context_manager.options.capture_task and self.state.task is None:
             self.set_task(user_msg.content, source_message_ids=(user_msg.id,))
         self._recovery.clear()
-
 
         # Reset the per-prompt iteration budget. ``max_iterations`` caps the
         # work this *prompt* triggers, not the lifetime of the session.
