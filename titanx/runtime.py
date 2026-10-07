@@ -12,6 +12,7 @@ from html import escape
 
 from .safety.egress import caller_scope
 from .policy.execution import ExecutionAuthorizationError, ExecutionGuard, ExecutionGuardOptions
+from .context.recovery import ContextRecovery
 from .state import append_message, create_config, create_initial_state, set_pending_approval
 from .types import (
     AgentConfig,
@@ -145,8 +146,7 @@ class AgentRuntime:
                 from .context.summary import LlmCompactionStrategy
                 self._compaction_strategy = LlmCompactionStrategy(llm)
         self._compaction_tracking = CompactionTracking()
-        self._context_stop_reason: str | None = None
-        self._context_completion_pending = False
+        self._recovery = ContextRecovery()
         self._closed = False
 
         # ``reject_pending_tool`` intentionally stays synchronous for host/UI
@@ -227,20 +227,20 @@ class AgentRuntime:
         This is an explicit host recovery action, not an automatic retry loop.
         Existing approval requirements remain in force.
         """
-        if self._context_stop_reason is None:
+        if not self._recovery.stopped:
             raise RuntimeError("runtime is not stopped by a context failure")
-        if self._context_completion_pending:
+        if self._recovery.mode == "archive_only":
             # The answer already exists. Repair only its failed final archive;
             # requesting another model turn could cause duplicate work.
             with self.scoped_hooks(hooks):
-                self._context_stop_reason = None
+                self._recovery.clear()
                 await self._finish_loop("completed")
                 return self.state
         if self.state.pending_approval is not None:
             raise RuntimeError("resolve pending approval before retrying context")
         from .context.types import CompactionTracking
         self._compaction_tracking = CompactionTracking()
-        self._context_stop_reason = None
+        self._recovery.clear()
         self.state.iteration = 0
         self.state.signal = "continue"
         return await self.resume(hooks=hooks)
@@ -337,8 +337,8 @@ class AgentRuntime:
         append_message(self.state, user_msg)
         if self._context_manager and self._context_manager.options.capture_task and self.state.task is None:
             self.set_task(user_msg.content, source_message_ids=(user_msg.id,))
-        self._context_stop_reason = None
-        self._context_completion_pending = False
+        self._recovery.clear()
+
 
         # Reset the per-prompt iteration budget. ``max_iterations`` caps the
         # work this *prompt* triggers, not the lifetime of the session.
@@ -571,7 +571,7 @@ class AgentRuntime:
             if self._compaction_strategy and self._compaction_options:
                 stop_reason = await self._maybe_compact()
                 if stop_reason is not None:
-                    self._context_stop_reason = stop_reason
+                    self._recovery.stop(stop_reason)
                     self.state.signal = "stop"
                     await self._finish_loop(stop_reason)
                     break
@@ -795,14 +795,14 @@ class AgentRuntime:
 
     async def _finish_loop(self, reason: str) -> None:
         from .types import LoopEndEvent
-        if self._context_manager and self._context_stop_reason != "context_storage_failed":
+        if self._context_manager and not self._recovery.archive_blocked:
             try:
                 await self._context_manager.archive(self.state)
             except Exception:
-                self._context_completion_pending = reason == "completed"
+                self._recovery.note_archive_failure(answer_pending=reason == "completed")
                 await self._stop_for_context("context_storage_failed")
                 return
-        self._context_completion_pending = False
+        self._recovery.clear_completion()
         previous = self._approval_resume_task
         if reason == "pending_approval":
             self._approval_resume_task = asyncio.current_task()
@@ -813,7 +813,7 @@ class AgentRuntime:
 
     async def _stop_for_context(self, reason: str) -> None:
         from .types import CompactionBlockedEvent, LoopEndEvent
-        self._context_stop_reason = reason
+        self._recovery.stop(reason)
         self.state.signal = "stop"
         budget = self._compaction_options.input_budget if self._compaction_options else 0
         await self._emit(CompactionBlockedEvent(reason, None, budget))
