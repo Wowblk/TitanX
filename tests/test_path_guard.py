@@ -14,6 +14,7 @@ import pytest
 from titanx.sandbox.path_guard import (
     extract_shell_write_targets,
     is_path_allowed,
+    scan_shell_write_targets,
 )
 
 
@@ -92,3 +93,58 @@ class TestExtractShellWriteTargets:
 
     def test_no_write(self) -> None:
         assert extract_shell_write_targets("cat /etc/hosts") == []
+
+
+class TestWriteTargetDetectionGaps:
+    """Flag-form / verb-form gaps found by adversarial probing.
+
+    The static scanner is defence-in-depth, but it advertises "fail closed":
+    a write-capable command whose target it cannot name should either be
+    detected or refused — never silently passed with an empty target list.
+    Each case below was a silent pass before the fix.
+    """
+
+    @pytest.mark.parametrize("command,expected", [
+        ("sed --in-place 's/a/b/' /etc/passwd", "/etc/passwd"),
+        ("sed --in-place=.bak 's/a/b/' /etc/passwd", "/etc/passwd"),
+        ("cp -t /etc foo", "/etc"),
+        ("cp --target-directory=/etc foo", "/etc"),
+        ("mv -t /etc foo", "/etc"),
+        ("install --target-directory /usr/local/bin foo", "/usr/local/bin"),
+        ("curl -o/etc/x http://h/", "/etc/x"),
+        ("curl --output=/etc/x http://h/", "/etc/x"),
+        ("wget -O/etc/x http://h/", "/etc/x"),
+        ("wget --output-document=/etc/x http://h/", "/etc/x"),
+        ("/bin/cp foo /etc/x", "/etc/x"),
+        ("/usr/bin/tee /etc/x", "/etc/x"),
+        ("busybox dd of=/etc/x", "/etc/x"),
+        ("tar -cf /etc/out.tar f", "/etc/out.tar"),
+        ("tar cf /etc/out.tar f", "/etc/out.tar"),
+    ])
+    def test_flag_and_verb_forms_are_detected(self, command: str, expected: str) -> None:
+        targets = extract_shell_write_targets(command)
+        assert expected in targets, f"{command!r} -> {targets}"
+
+    @pytest.mark.parametrize("command", [
+        "tar xf a.tar -C /etc",   # traditional (no-dash) extract
+        "tar xf a.tar",
+        "bash -ccmd",             # fused inline-code flag
+        "bash -lc 'echo x'",      # combined login+command cluster
+        "/bin/bash -c 'echo x'",  # path-prefixed shell
+        "python3 -c'import os'",  # fused python inline code
+    ])
+    def test_unanalysable_commands_are_refused(self, command: str) -> None:
+        scan = scan_shell_write_targets(command)
+        assert scan.refuse_reason is not None, f"{command!r} was not refused"
+
+    def test_tar_no_dash_list_is_not_treated_as_extract(self) -> None:
+        # `tvf` = list (read-only); must not be refused as an extract.
+        scan = scan_shell_write_targets("tar tvf /etc/a.tar")
+        assert scan.refuse_reason is None
+
+    def test_source_named_with_x_is_not_a_false_extract(self) -> None:
+        # A source operand containing the letter x must not trip the
+        # traditional-cluster extract heuristic.
+        scan = scan_shell_write_targets("tar cf /tmp/out.tar myxfile")
+        assert scan.refuse_reason is None
+        assert "/tmp/out.tar" in scan.targets

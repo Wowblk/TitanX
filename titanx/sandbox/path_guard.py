@@ -177,6 +177,28 @@ def _split_into_segments(tokens: list[str]) -> list[list[str]]:
     return [s for s in segments if s]
 
 
+def _basename(token: str) -> str:
+    """Return the command word without any leading path (``/bin/cp`` → ``cp``)."""
+    return token.rsplit("/", 1)[-1]
+
+
+def _has_inline_code_flag(args: list[str], letters: str) -> bool:
+    """True if any short-flag token carries one of ``letters``.
+
+    Covers both the separated form (``bash -c code`` → token ``-c``) and the
+    fused / clustered forms (``bash -ccmd`` → token ``-ccmd``; ``bash -lc x``
+    → token ``-lc``). Long options (``--…``) are ignored: none of the inline
+    code flags we care about are long options.
+    """
+    for tok in args:
+        if not tok.startswith("-") or tok.startswith("--"):
+            continue
+        body = tok[1:]
+        if any(ch in body for ch in letters):
+            return True
+    return False
+
+
 def _scan_segment(tokens: list[str], *, cwd: str | None) -> ShellWriteScan:
     if not tokens:
         return ShellWriteScan()
@@ -190,34 +212,46 @@ def _scan_segment(tokens: list[str], *, cwd: str | None) -> ShellWriteScan:
                     f"that cannot be statically resolved"
                 ))
 
-    verb = tokens[0]
+    # 2. Resolve the effective verb. Strip a leading path (`/bin/cp`, `./tee`)
+    #    and unwrap the `busybox <applet>` idiom so an unknown-name wrapper
+    #    cannot hide a write-capable verb. `cmd` keeps the verb token first so
+    #    the per-verb handlers (which start at index 1) work unchanged.
+    verb_offset = 0
+    verb = _basename(tokens[0])
+    if verb == "busybox":
+        j = 1
+        while j < len(tokens) and tokens[j].startswith("-"):
+            j += 1
+        if j < len(tokens):
+            verb_offset = j
+            verb = _basename(tokens[j])
+    cmd = tokens[verb_offset:]
 
-    # 2. Hard refuse: dynamic-code verbs.
+    # 3. Hard refuse: dynamic-code verbs.
     if verb in _INLINE_DYNAMIC_VERBS:
         return ShellWriteScan(refuse_reason=(
             f"verb '{verb}' executes dynamic code that cannot be statically analysed"
         ))
-    if verb in _SHELL_INTERPRETERS and "-c" in tokens[1:]:
+    if verb in _SHELL_INTERPRETERS and _has_inline_code_flag(cmd[1:], "c"):
         return ShellWriteScan(refuse_reason=(
-            f"shell '{verb}' invoked with '-c' inline script — refusing"
+            f"shell '{verb}' invoked with an inline-script flag — refusing"
         ))
-    if verb in _SCRIPT_INTERPRETERS:
-        if "-c" in tokens[1:] or "-e" in tokens[1:]:
-            return ShellWriteScan(refuse_reason=(
-                f"interpreter '{verb}' invoked with inline-code flag — refusing"
-            ))
+    if verb in _SCRIPT_INTERPRETERS and _has_inline_code_flag(cmd[1:], "ce"):
+        return ShellWriteScan(refuse_reason=(
+            f"interpreter '{verb}' invoked with inline-code flag — refusing"
+        ))
 
-    # 3. Per-verb write-target extraction (returns its own targets / refuse).
+    # 4. Per-verb write-target extraction (returns its own targets / refuse).
     handler = _VERB_HANDLERS.get(verb)
     if handler is not None:
-        targets, refuse = handler(tokens, cwd=cwd)
+        targets, refuse = handler(cmd, cwd=cwd)
         if refuse:
             return ShellWriteScan(refuse_reason=refuse)
         verb_targets = targets
     else:
         verb_targets = []
 
-    # 4. Always also scan for redirections — they can appear after any verb.
+    # 5. Always also scan for redirections — they can appear after any verb.
     redir = _scan_redirections(tokens, cwd=cwd)
     if redir.refuse_reason:
         return redir
@@ -302,14 +336,43 @@ def _h_tee(tokens: list[str], *, cwd: str | None):
 
 
 def _h_cp_mv_install(tokens: list[str], *, cwd: str | None):
-    positional = [t for t in tokens[1:] if not t.startswith("-")]
-    if not positional:
-        return [], None
-    dst = positional[-1]
-    resolved = _resolve_path(dst, cwd=cwd)
-    if resolved is None:
-        return [], f"copy/move destination {dst!r} cannot be statically resolved"
-    return [resolved], None
+    targets: list[str] = []
+    positional: list[str] = []
+    has_target_dir = False
+    j = 1
+    while j < len(tokens):
+        tok = tokens[j]
+        if tok in ("-t", "--target-directory"):
+            if j + 1 >= len(tokens):
+                return [], f"{tok} requires a directory argument"
+            dst, j = tokens[j + 1], j + 2
+        elif tok.startswith("--target-directory="):
+            dst, j = tok.split("=", 1)[1], j + 1
+        elif tok.startswith("-t") and len(tok) > 2 and not tok.startswith("--"):
+            dst, j = tok[2:], j + 1
+        elif tok.startswith("-"):
+            j += 1
+            continue
+        else:
+            positional.append(tok)
+            j += 1
+            continue
+        # `-t DIR` names the destination explicitly; the positional operands
+        # are then sources only. Without this branch the real destination is
+        # skipped and a source operand is checked as if it were the target.
+        has_target_dir = True
+        resolved = _resolve_path(dst, cwd=cwd)
+        if resolved is None:
+            return [], f"copy/move destination {dst!r} cannot be statically resolved"
+        targets.append(resolved)
+
+    if not has_target_dir and positional:
+        dst = positional[-1]
+        resolved = _resolve_path(dst, cwd=cwd)
+        if resolved is None:
+            return [], f"copy/move destination {dst!r} cannot be statically resolved"
+        targets.append(resolved)
+    return targets, None
 
 
 def _h_dd(tokens: list[str], *, cwd: str | None):
@@ -325,9 +388,14 @@ def _h_dd(tokens: list[str], *, cwd: str | None):
 
 
 def _h_sed(tokens: list[str], *, cwd: str | None):
-    inplace = any(t == "-i" or t.startswith("-i.") or
-                  (t.startswith("-i") and len(t) > 2 and t[2:].isalnum())
-                  for t in tokens[1:])
+    # In-place edit flags: `-i`, `-i.bak`, `-i~` (any fused suffix), and the
+    # long form `--in-place` / `--in-place=.bak`. The long form used to slip
+    # through, letting `sed --in-place s/a/b/ /etc/passwd` write unguarded.
+    inplace = any(
+        t == "--in-place" or t.startswith("--in-place=")
+        or (t.startswith("-i") and not t.startswith("--"))
+        for t in tokens[1:]
+    )
     if not inplace:
         return [], None
 
@@ -367,13 +435,18 @@ def _h_wget(tokens: list[str], *, cwd: str | None):
     while j < len(tokens):
         tok = tokens[j]
         if tok in ("-O", "--output-document") and j + 1 < len(tokens):
-            resolved = _resolve_path(tokens[j + 1], cwd=cwd)
-            if resolved is None:
-                return [], f"wget -O target {tokens[j + 1]!r} cannot be statically resolved"
-            targets.append(resolved)
-            j += 2
+            val, j = tokens[j + 1], j + 2
+        elif tok.startswith("--output-document="):
+            val, j = tok.split("=", 1)[1], j + 1
+        elif tok.startswith("-O") and len(tok) > 2 and not tok.startswith("--"):
+            val, j = tok[2:], j + 1
+        else:
+            j += 1
             continue
-        j += 1
+        resolved = _resolve_path(val, cwd=cwd)
+        if resolved is None:
+            return [], f"wget -O target {val!r} cannot be statically resolved"
+        targets.append(resolved)
     return targets, None
 
 
@@ -383,36 +456,106 @@ def _h_curl(tokens: list[str], *, cwd: str | None):
     while j < len(tokens):
         tok = tokens[j]
         if tok in ("-o", "--output") and j + 1 < len(tokens):
-            resolved = _resolve_path(tokens[j + 1], cwd=cwd)
-            if resolved is None:
-                return [], f"curl -o target {tokens[j + 1]!r} cannot be statically resolved"
-            targets.append(resolved)
-            j += 2
+            val, j = tokens[j + 1], j + 2
+        elif tok.startswith("--output="):
+            val, j = tok.split("=", 1)[1], j + 1
+        elif tok.startswith("-o") and len(tok) > 2 and not tok.startswith("--"):
+            val, j = tok[2:], j + 1
+        else:
+            j += 1
             continue
-        j += 1
+        resolved = _resolve_path(val, cwd=cwd)
+        if resolved is None:
+            return [], f"curl -o target {val!r} cannot be statically resolved"
+        targets.append(resolved)
     return targets, None
 
 
 def _h_tar(tokens: list[str], *, cwd: str | None):
-    # Extract operations write to either cwd or `-C dir` and can produce an
-    # arbitrary tree. We can't bound them statically — refuse.
-    is_extract = any(t in ("-x", "--extract", "--get") or
-                     (t.startswith("-") and not t.startswith("--") and "x" in t)
-                     for t in tokens[1:])
-    if is_extract:
-        return [], "tar extract operations write an unbounded tree — refusing"
-    targets: list[str] = []
-    j = 1
-    while j < len(tokens):
-        tok = tokens[j]
-        if tok in ("-f", "--file") and j + 1 < len(tokens):
-            resolved = _resolve_path(tokens[j + 1], cwd=cwd)
-            if resolved is None:
-                return [], f"tar archive {tokens[j + 1]!r} cannot be statically resolved"
-            targets.append(resolved)
-            j += 2
+    # tar is the messiest verb: options arrive dash-prefixed (`-cf`, `-c -f`),
+    # as long options (`--create --file=`), or in the traditional *old-style*
+    # cluster with no dash (`tar cf ARCHIVE …`). The mode letter decides
+    # whether tar writes (`c`/`r`/`u`/`A` → the `-f` archive is a write
+    # target) or reads (`t` lists). Extract (`x`) writes an unbounded tree and
+    # is refused. The old code only understood dash-prefixed `-x`/`-f`, so the
+    # no-dash cluster forms slipped through both the extract refusal and the
+    # archive-target extraction.
+    args = tokens[1:]
+
+    archive: str | None = None
+    write_mode = False
+    extract = False
+
+    def _consume_cluster(cluster: str, index: int) -> int:
+        """Interpret one short-option cluster; return the next unread arg index."""
+        nonlocal archive, write_mode, extract
+        k = 0
+        while k < len(cluster):
+            ch = cluster[k]
+            if ch == "x":
+                extract = True
+            elif ch in ("c", "r", "u", "A"):
+                write_mode = True
+            elif ch == "f":
+                tail = cluster[k + 1:]
+                if tail:
+                    archive = tail
+                    return index
+                if index < len(args):
+                    archive = args[index]
+                    return index + 1
+                return index
+            elif ch in ("C", "T", "X", "b", "N"):
+                # These consume the following argument; skip it so the archive
+                # operand after `-f` is located at the right offset.
+                if k == len(cluster) - 1 and index < len(args):
+                    return index + 1
+            k += 1
+        return index
+
+    index = 0
+    first_operand_seen = False
+    while index < len(args):
+        tok = args[index]
+        if tok == "--":
+            break
+        if tok.startswith("--"):
+            name, _, value = tok.partition("=")
+            if name in ("--extract", "--get"):
+                extract = True
+            elif name in ("--create", "--append", "--update", "--concatenate"):
+                write_mode = True
+            elif name == "--file":
+                if value:
+                    archive = value
+                elif index + 1 < len(args):
+                    archive = args[index + 1]
+                    index += 1
+            index += 1
             continue
-        j += 1
+        if tok.startswith("-") and len(tok) > 1:
+            index = _consume_cluster(tok[1:], index + 1)
+            continue
+        # No leading dash. In the old-style form the *first* such operand is
+        # the option cluster (`cf`, `xf`, `tvf`, …); every later operand is a
+        # file, so a source tree containing the letter `x` is not mistaken for
+        # an extract operation.
+        if not first_operand_seen and tok.isalpha():
+            first_operand_seen = True
+            index = _consume_cluster(tok, index + 1)
+            continue
+        first_operand_seen = True
+        index += 1
+
+    if extract:
+        return [], "tar extract operations write an unbounded tree — refusing"
+
+    targets: list[str] = []
+    if write_mode and archive is not None:
+        resolved = _resolve_path(archive, cwd=cwd)
+        if resolved is None:
+            return [], f"tar archive {archive!r} cannot be statically resolved"
+        targets.append(resolved)
     return targets, None
 
 
