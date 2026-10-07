@@ -8,22 +8,39 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
 
-from .policy.execution import ExecutionAuthorizationError, ExecutionGuard, ExecutionGuardOptions
+from .context.compactor import auto_compact_if_needed
+from .context.manager import CONTEXT_TOOL_NAMES, ContextManager, context_tool_definitions
 from .context.recovery import ContextRecovery
+from .context.summary import LlmCompactionStrategy
+from .context.tasks import model_messages
+from .context.tokens import estimate_input_tokens
+from .context.transcript import Transcript
+from .context.types import CompactionTracking
+from .policy import AgentPolicy, AuditEntry, AuditLog, PolicyStore
+from .policy.execution import ExecutionAuthorizationError, ExecutionGuard, ExecutionGuardOptions
 from .state import append_message, create_config, create_initial_state, now_iso, set_pending_approval
 from .tool_pipeline import ToolCallPipeline
 from .types import (
     AgentConfig,
     AgentState,
     AssistantMessage,
+    AssistantTextEvent,
+    AssistantToolCallsEvent,
+    CompactionBlockedEvent,
+    CompactionExhaustedEvent,
+    CompactionFailedEvent,
+    CompactionTriggeredEvent,
+    IterationStartEvent,
     LlmAdapter,
+    LoopEndEvent,
+    LoopStartEvent,
     PendingApproval,
     RuntimeEvent,
     RuntimeHooks,
     SafetyLayerLike,
     ToolCall,
-    ToolDefinition,
     ToolMessage,
+    ToolResultEvent,
     ToolRuntime,
     TaskState,
     UserMessage,
@@ -57,13 +74,9 @@ class AgentRuntime:
         context_options=None,
         execution_guard_options: ExecutionGuardOptions | None = None,
     ) -> None:
-        from .context.compactor import CompactionTracking
-        from .policy import AgentPolicy, AuditLog, PolicyStore
-
         available_tools = list(tools.list_tools())
         injected_context_tools: list[str] = []
         if context_options is not None:
-            from .context.manager import CONTEXT_TOOL_NAMES, context_tool_definitions
             if any(tool.name in CONTEXT_TOOL_NAMES for tool in available_tools):
                 raise ValueError("context_read and context_search are reserved when context management is enabled")
             context_definitions = context_tool_definitions(
@@ -120,7 +133,6 @@ class AgentRuntime:
         self._compaction_strategy = compaction_strategy
         self._compaction_options = compaction_options
         if compaction_options is not None:
-            from .context.tokens import estimate_input_tokens
             if compaction_options.token_estimator is estimate_input_tokens:
                 def count_current_input(config, messages):
                     counter = getattr(self._llm, "count_input_tokens", None)
@@ -130,14 +142,11 @@ class AgentRuntime:
         # One owner for wholesale transcript replacement, shared by offload
         # (ContextManager) and compaction so neither can silently violate the
         # pinned-message / single-summary / tool-group invariants.
-        from .context.transcript import Transcript
         self._transcript = Transcript(self.config)
         self._context_manager = None
         if context_options is not None:
-            from .context.manager import ContextManager
             self._context_manager = ContextManager(context_options, self.config, transcript=self._transcript)
             if compaction_options is not None and compaction_strategy is None:
-                from .context.summary import LlmCompactionStrategy
                 self._compaction_strategy = LlmCompactionStrategy(llm)
         self._compaction_tracking = CompactionTracking()
         self._recovery = ContextRecovery()
@@ -247,7 +256,6 @@ class AgentRuntime:
                 return self.state
         if self.state.pending_approval is not None:
             raise RuntimeError("resolve pending approval before retrying context")
-        from .context.types import CompactionTracking
         self._compaction_tracking = CompactionTracking()
         self._recovery.clear()
         self.state.iteration = 0
@@ -360,7 +368,6 @@ class AgentRuntime:
         self.state.approved_tool_call_ids = set()
         self._execution_guard.start_run(self.config)
 
-        from .types import LoopStartEvent
         await self._emit(LoopStartEvent())
         self.state.signal = "continue"
         return await self._run_loop()
@@ -447,13 +454,6 @@ class AgentRuntime:
         return self._policy_store.get_policy().max_iterations
 
     async def _run_loop(self) -> AgentState:
-        from .types import (
-            AssistantTextEvent,
-            AssistantToolCallsEvent,
-            IterationStartEvent,
-            LoopEndEvent,
-        )
-
         try:
             await self._publish_pending_host_rejections()
             return await self._run_loop_inner()
@@ -492,9 +492,6 @@ class AgentRuntime:
 
     async def _publish_pending_host_rejections(self) -> None:
         """Flush synchronous host rejections into audit + event streams."""
-        from .policy import AuditEntry
-        from .types import ToolResultEvent
-
         while self._pending_host_rejections:
             tool_name, tool_call_id, reason = self._pending_host_rejections[0]
             await self._audit_log.append(AuditEntry(
@@ -530,13 +527,6 @@ class AgentRuntime:
             self.state.pending_tool_call_index = 0
 
     async def _run_loop_inner(self) -> AgentState:
-        from .types import (
-            AssistantTextEvent,
-            AssistantToolCallsEvent,
-            IterationStartEvent,
-            LoopEndEvent,
-        )
-
         while self.state.signal != "stop":
             # ── Resume path ──────────────────────────────────────────────────
             # If a previous turn's tool-call batch was paused (e.g. by an
@@ -589,7 +579,6 @@ class AgentRuntime:
             # an adapter. Actual grants stay private to the execution guard.
             model_state = replace(self.state, approved_tool_call_ids=set())
             if self.state.task is not None:
-                from .context.tasks import model_messages
                 model_state = copy.deepcopy(model_state)
                 model_state.messages = model_messages(model_state)
             turn = await self._llm.respond(copy.deepcopy(self.config), model_state)
@@ -671,14 +660,6 @@ class AgentRuntime:
 
     async def _maybe_compact(self) -> str | None:
         """Return a stop reason if preflight cannot safely admit the request."""
-        from .context.compactor import auto_compact_if_needed
-        from .types import (
-            CompactionBlockedEvent,
-            CompactionExhaustedEvent,
-            CompactionFailedEvent,
-            CompactionTriggeredEvent,
-        )
-
         prev_failures = self._compaction_tracking.consecutive_failures
         compact = await auto_compact_if_needed(
             self.state,
@@ -733,7 +714,6 @@ class AgentRuntime:
         return None
 
     async def _finish_loop(self, reason: str) -> None:
-        from .types import LoopEndEvent
         if self._context_manager and not self._recovery.archive_blocked:
             try:
                 await self._context_manager.archive(self.state)
@@ -751,7 +731,6 @@ class AgentRuntime:
             self._approval_resume_task = previous
 
     async def _stop_for_context(self, reason: str) -> None:
-        from .types import CompactionBlockedEvent, LoopEndEvent
         self._recovery.stop(reason)
         self.state.signal = "stop"
         budget = self._compaction_options.input_budget if self._compaction_options else 0
