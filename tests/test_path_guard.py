@@ -263,3 +263,53 @@ class TestReviewHardeningGaps:
         self, command: str, expected: list[str]
     ) -> None:
         assert extract_shell_write_targets(command) == expected
+
+
+class TestWrapperPeelRegressions:
+    """Regressions the *second* hardening pass introduced into the wrapper peel.
+
+    Tightening the wrapper option scanner to skip lone `-` and to look past
+    `--` opened three holes: a lone `-` was skipped instead of *terminating*
+    the option scan (so the following `bash -c` was never reached), a `--`
+    ended the loop before post-`--` `NAME=value` assignments, and the
+    `env -S` guard matched any bundle merely *containing* an `S`
+    (`-uSSH_AUTH_SOCK`) — refusing a benign command while the inline shell
+    still slipped past. Each case states the secure outcome.
+    """
+
+    @pytest.mark.parametrize("command", [
+        "env - bash -c 'echo x'",
+        "nice - bash -c 'echo x'",
+        "timeout - bash -c 'echo x'",
+    ])
+    def test_lone_dash_does_not_hide_inline_shell(self, command: str) -> None:
+        # A lone `-` is `env -i` / a separator, not the wrapped command;
+        # the shell behind it must still be refused.
+        scan = scan_shell_write_targets(command)
+        assert scan.refuse_reason is not None, f"{command!r} was not refused"
+
+    @pytest.mark.parametrize("command", [
+        "env -- FOO=bar bash -c 'echo x'",
+        "env -i -- FOO=bar bash -c 'echo x'",
+    ])
+    def test_env_assign_after_double_dash_is_skipped(self, command: str) -> None:
+        # `--` ends *options*, but `env` still accepts NAME=value after it;
+        # the assignment must not be mistaken for the command.
+        scan = scan_shell_write_targets(command)
+        assert scan.refuse_reason is not None, f"{command!r} was not refused"
+
+    def test_stdbuf_output_consumes_separate_value(self) -> None:
+        scan = scan_shell_write_targets("stdbuf --output L bash -c 'echo x'")
+        assert scan.refuse_reason is not None
+
+    def test_env_dash_before_cp_is_peeled(self) -> None:
+        scan = scan_shell_write_targets("env - cp -t /etc foo")
+        assert scan.refuse_reason is None
+        assert "/etc" in scan.targets
+
+    def test_env_value_shorts_containing_S_are_not_refused(self) -> None:
+        # `-uSSH_AUTH_SOCK` = `-u` with value `SSH_AUTH_SOCK`; the `S` is in
+        # the *value*, not an option letter. Refusing it was a false positive.
+        scan = scan_shell_write_targets("env -uSSH_AUTH_SOCK cp -t /etc foo")
+        assert scan.refuse_reason is None
+        assert "/etc" in scan.targets

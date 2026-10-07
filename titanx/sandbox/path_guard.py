@@ -101,6 +101,7 @@ _WRAPPER_VALUE_LONGS: dict[str, frozenset[str]] = {
     "env": frozenset({"--unset", "--chdir", "--split-string"}),
     "nice": frozenset({"--adjustment"}),
     "timeout": frozenset({"--signal", "--kill-after"}),
+    "stdbuf": frozenset({"--input", "--output", "--error"}),
     "time": frozenset({"--format", "--output"}),
     "xargs": frozenset({"--arg-file", "--eof", "--replace", "--max-lines",
                         "--max-args", "--max-procs", "--max-chars",
@@ -300,8 +301,16 @@ def _scan_segment(tokens: list[str], *, cwd: str | None) -> ShellWriteScan:
             while i < len(rest):
                 tok = rest[i]
                 if tok == "--":
+                    # End of wrapper options — but `env` still allows
+                    # NAME=value assignments after it, so keep scanning
+                    # rather than treating the next token as the command.
                     i += 1
-                    break
+                    continue
+                if tok == "-":
+                    # GNU `env` treats a lone `-` as `-i`; it is an option,
+                    # not the wrapped command.
+                    i += 1
+                    continue
                 if tok.startswith("--"):
                     if verb == "env" and (
                         tok == "--split-string" or tok.startswith("--split-string=")
@@ -318,17 +327,22 @@ def _scan_segment(tokens: list[str], *, cwd: str | None) -> ShellWriteScan:
                         i += 1
                     continue
                 if tok.startswith("-") and len(tok) > 1:
-                    if verb == "env" and "S" in tok[1:]:
+                    body = tok[1:]
+                    eats_next = False
+                    first_value_letter: str | None = None
+                    for k, ch in enumerate(body):
+                        if ch in value_shorts:
+                            first_value_letter = ch
+                            eats_next = k == len(body) - 1
+                            break
+                    # `env -S` re-splits its value into a command we cannot
+                    # see. Only the *option letter* counts — a value like
+                    # `-uSSH_AUTH_SOCK` merely contains an `S`.
+                    if verb == "env" and first_value_letter == "S":
                         return ShellWriteScan(refuse_reason=(
                             "env -S re-splits its argument into a command "
                             "that cannot be statically analysed"
                         ))
-                    body = tok[1:]
-                    eats_next = False
-                    for k, ch in enumerate(body):
-                        if ch in value_shorts:
-                            eats_next = k == len(body) - 1
-                            break
                     i += 2 if eats_next else 1
                     continue
                 if verb == "env" and _ENV_ASSIGN_RE.match(tok):
