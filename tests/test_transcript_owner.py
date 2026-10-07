@@ -28,7 +28,7 @@ from titanx.types import (
     UserMessage,
 )
 
-from ._helpers import NullTools, ScriptedLlm, SingleTool
+from ._helpers import NullTools, ScriptedLlm, SingleTool, authorizing_policy_store
 
 
 def _tool_groups_intact(messages) -> bool:
@@ -102,6 +102,9 @@ class TestRuntimeRoutesThroughOwner:
             context_options=ContextOptions(store, offload_threshold_chars=500, preview_chars=50),
             compaction_options=CompactionOptions(100000, min_recent_messages=1),
             compaction_strategy=_SummaryStrategy(),
+            # Deny-by-default (#4) requires the host to authorise the tool under
+            # test; this test's subject is the transcript owner, not the policy.
+            policy_store=authorizing_policy_store(tool, include_context=True),
         )
         try:
             await runtime.run_prompt("read the logs")
