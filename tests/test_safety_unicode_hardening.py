@@ -21,10 +21,11 @@ import pytest
 from titanx.safety.safety_layer import SafetyLayer
 
 # Zero-width / formatting code points an attacker can fuse into a trigger
-# word. Every one of these has no legitimate place inside user text. The
-# second half are the ones a first pass missed — format controls outside
-# the ranges shipped initially (``Cf``), plus blanks/fillers that are not
-# ``Cf`` at all (Braille blank, Mongolian free variation selectors).
+# word or an email address. None of these belong inside such a token — they
+# only exist to split it. The second half are the ones a first pass missed:
+# format controls outside the ranges shipped initially (``Cf``), plus
+# blanks/fillers that are not ``Cf`` at all (Braille blank, Mongolian free
+# variation selectors).
 _INVISIBLES = {
     "hangul_filler_u3164": "\u3164",
     "grapheme_joiner_u034f": "\u034f",

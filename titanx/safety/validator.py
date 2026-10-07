@@ -48,7 +48,7 @@ class InputValidator(ValidatorLike):
         warnings: list[ValidationIssue] = []
 
         for key, value in params.items():
-            if isinstance(key, str):
+            if isinstance(key, str) and key:
                 self._scan_value(key, f"<key:{key}>", errors, warnings)
             self._scan_value(value, key, errors, warnings)
 
@@ -76,7 +76,7 @@ class InputValidator(ValidatorLike):
             warnings.extend(result.warnings)
         elif isinstance(value, Mapping):
             for key, child in value.items():
-                if isinstance(key, str):
+                if isinstance(key, str) and key:
                     self._scan_value(key, f"{field}.<key:{key}>", errors, warnings)
                 self._scan_value(child, f"{field}.{key}", errors, warnings)
         elif isinstance(value, (list, tuple, set, frozenset)):

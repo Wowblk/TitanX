@@ -63,3 +63,8 @@ class TestKeysAndNonListContainers:
             {"headers": {"Accept": "application/json"}, "n": 1}
         )
         assert result.is_valid is True
+
+    def test_empty_key_is_not_an_injection_error(self) -> None:
+        # An empty JSON object key is odd but not an injection; it must not
+        # trip the empty-input rule that applies to user content.
+        assert InputValidator().validate_tool_params({"": "value"}).is_valid is True

@@ -85,9 +85,35 @@ _INLINE_DYNAMIC_VERBS = {"eval", "exec", "source", "."}
 _WRAPPER_VERBS = {"env", "nice", "nohup", "setsid", "time", "timeout",
                   "stdbuf", "xargs"}
 
-# Wrapper options that take a numeric/duration operand (`nice -n 10`,
-# `timeout 5`, `stdbuf -o0`). Skipped when locating the wrapped command.
+# Short options that consume a *separate* argument for each wrapper
+# (`env -u NAME`, `timeout -s SIG`, `xargs -a FILE`). Without these, the
+# option's value is mistaken for the wrapped command and the real command
+# (possibly an inline shell) is never examined.
+_WRAPPER_VALUE_SHORTS: dict[str, frozenset[str]] = {
+    "env": frozenset({"u", "C", "S"}),
+    "nice": frozenset({"n"}),
+    "timeout": frozenset({"s", "k"}),
+    "stdbuf": frozenset({"i", "o", "e"}),
+    "time": frozenset({"f", "o"}),
+    "xargs": frozenset({"a", "E", "I", "L", "n", "P", "s", "d"}),
+}
+_WRAPPER_VALUE_LONGS: dict[str, frozenset[str]] = {
+    "env": frozenset({"--unset", "--chdir", "--split-string"}),
+    "nice": frozenset({"--adjustment"}),
+    "timeout": frozenset({"--signal", "--kill-after"}),
+    "time": frozenset({"--format", "--output"}),
+    "xargs": frozenset({"--arg-file", "--eof", "--replace", "--max-lines",
+                        "--max-args", "--max-procs", "--max-chars",
+                        "--delimiter"}),
+}
+
+# A wrapper duration/argument operand (`timeout 5`, `timeout 5s`,
+# `nice 10`). Skipped when locating the wrapped command.
 _NUMERICISH_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
+
+# `NAME=value` environment assignment (`env PATH=/usr/bin …`). The value
+# may contain slashes, so we validate the *name* shape, not the value.
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 # Top-level shell separators — splitting on these gives us per-command segments.
 _SEGMENT_SEPARATORS = {"&&", "||", ";", "|", "&"}
@@ -268,17 +294,48 @@ def _scan_segment(tokens: list[str], *, cwd: str | None) -> ShellWriteScan:
                 continue
         if verb in _WRAPPER_VERBS:
             rest = cmd[1:]
+            value_shorts = _WRAPPER_VALUE_SHORTS.get(verb, frozenset())
+            value_longs = _WRAPPER_VALUE_LONGS.get(verb, frozenset())
             i = 0
             while i < len(rest):
                 tok = rest[i]
-                if tok.startswith("-"):
+                if tok == "--":
                     i += 1
+                    break
+                if tok.startswith("--"):
+                    if verb == "env" and (
+                        tok == "--split-string" or tok.startswith("--split-string=")
+                    ):
+                        return ShellWriteScan(refuse_reason=(
+                            "env --split-string re-splits its argument into a "
+                            "command that cannot be statically analysed"
+                        ))
+                    if "=" in tok:
+                        i += 1  # --opt=value, self-contained
+                    elif tok in value_longs:
+                        i += 2  # --opt value
+                    else:
+                        i += 1
                     continue
-                if verb == "env" and "=" in tok and "/" not in tok:
-                    i += 1  # env VAR=value assignment
+                if tok.startswith("-") and len(tok) > 1:
+                    if verb == "env" and "S" in tok[1:]:
+                        return ShellWriteScan(refuse_reason=(
+                            "env -S re-splits its argument into a command "
+                            "that cannot be statically analysed"
+                        ))
+                    body = tok[1:]
+                    eats_next = False
+                    for k, ch in enumerate(body):
+                        if ch in value_shorts:
+                            eats_next = k == len(body) - 1
+                            break
+                    i += 2 if eats_next else 1
+                    continue
+                if verb == "env" and _ENV_ASSIGN_RE.match(tok):
+                    i += 1  # NAME=value assignment
                     continue
                 if verb != "env" and _NUMERICISH_RE.match(tok):
-                    i += 1  # timeout/nice/stdbuf duration operand
+                    i += 1  # timeout/nice duration operand
                     continue
                 break
             if i < len(rest):
@@ -378,7 +435,7 @@ def _resolve_path(path: str, *, cwd: str | None) -> str | None:
 # the whole command; returning ([], None) means "this verb does not write".
 
 
-VerbHandler = Callable[[list[str]], tuple[list[str], str | None]]
+VerbHandler = Callable[..., tuple[list[str], str | None]]
 
 
 def _h_tee(tokens: list[str], *, cwd: str | None):
@@ -449,9 +506,10 @@ def _h_rsync(tokens: list[str], *, cwd: str | None):
 
     rsync has no ``--target-directory``, so the cp/mv/install ``-t``
     handling must NOT apply — doing so recorded a source as the target and
-    dropped the real destination. Option values (``-e ssh``, ``--exclude
-    foo``) are operands that precede the destination, so "last positional
-    wins" stays correct.
+    dropped the real destination. rsync takes its destination as the last
+    operand; option *values* (``-e ssh``, ``--exclude foo``) precede it in
+    the common form, so "last positional wins" holds there. (An option that
+    trails the operands is a known limitation shared with the other verbs.)
     """
     positional = [t for t in tokens[1:] if not t.startswith("-")]
     if not positional:
@@ -494,8 +552,12 @@ def _h_sed(tokens: list[str], *, cwd: str | None):
             inplace = True
             j += 1
             continue
-        if tok.startswith("-") and not tok.startswith("--"):
-            if "i" in tok[1:]:
+        if tok.startswith("-"):
+            # Every other option is a flag: short clusters (`-ni`, `-Ei`)
+            # may also carry `-i`; long options (`--regexp-extended`,
+            # `--posix`) must NOT be mistaken for file operands, which
+            # would shift the script/file split.
+            if not tok.startswith("--") and "i" in tok[1:]:
                 inplace = True
             j += 1
             continue

@@ -223,3 +223,43 @@ class TestReviewHardeningGaps:
         scan = scan_shell_write_targets("timeout 5 tar cf /tmp/out.tar f")
         assert scan.refuse_reason is None
         assert "/tmp/out.tar" in scan.targets
+
+    # ── wrapper options that take a *separate* value ────────────────────
+    @pytest.mark.parametrize("command", [
+        "env -u X bash -c 'echo x'",
+        "env -C /tmp bash -c 'echo x'",
+        "timeout -s KILL 5 bash -c 'echo x'",
+        "timeout -k 5 10 bash -c 'echo x'",
+        "xargs -a list bash -c 'echo x'",
+        "xargs -n 1 bash -c 'echo x'",
+        "env PATH=/usr/bin bash -c 'echo x'",
+        "env LD_PRELOAD=/lib/x.so bash -c 'echo x'",
+    ])
+    def test_wrapped_inline_shell_with_option_values_is_refused(
+        self, command: str
+    ) -> None:
+        # A wrapper option whose value is a separate token must not be
+        # mistaken for the wrapped command (which then hides the `-c`).
+        scan = scan_shell_write_targets(command)
+        assert scan.refuse_reason is not None, f"{command!r} was not refused"
+
+    def test_wrapper_option_value_does_not_hide_write_target(self) -> None:
+        scan = scan_shell_write_targets("env -u X cp -t /etc foo")
+        assert scan.refuse_reason is None
+        assert "/etc" in scan.targets
+
+    def test_env_split_string_is_refused(self) -> None:
+        # `env -S` re-splits its value into a command; we cannot see inside
+        # it, so it must be refused rather than peeled as an opaque value.
+        scan = scan_shell_write_targets("env -S 'bash -c \"rm -rf /\"'")
+        assert scan.refuse_reason is not None
+
+    # ── sed: long options are flags, not file operands ──────────────────
+    @pytest.mark.parametrize("command,expected", [
+        ("sed --regexp-extended -i 's/a/b/' /etc/passwd", ["/etc/passwd"]),
+        ("sed -i 's/a/b/' --posix /etc/passwd", ["/etc/passwd"]),
+    ])
+    def test_sed_long_options_are_not_file_operands(
+        self, command: str, expected: list[str]
+    ) -> None:
+        assert extract_shell_write_targets(command) == expected
