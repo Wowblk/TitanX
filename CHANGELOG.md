@@ -112,8 +112,10 @@ always be flagged in the **Changed** / **Removed** sections.
 - **Transcript archiving is incremental, not O(n²)** — `ContextManager.archive`
   re-serialized and re-inserted the *entire* transcript on every `prepare` and
   `_finish_loop` call. It now tracks already-archived message ids (ids are
-  immutable) and submits only the delta; an unchanged transcript no longer
-  touches the store at all (`docs/design-review-2026-10-07.md` §5.3).
+  immutable) and submits only the delta; an unchanged transcript issues no
+  `store.archive` call (the task row is still upserted, and
+  `commit_compaction` still serializes its own originals+replacement once per
+  compaction) (`docs/design-review-2026-10-07.md` §5.3).
 - **MCP tool calls no longer serialize on the admission lock** —
   `McpAdmissionRuntime.execute` held `self._lock` across `client.call_tool`, so a
   slow (or hung-until-timeout) server stalled every other MCP tool on the same

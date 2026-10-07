@@ -82,8 +82,9 @@ class ContextManager:
         # immutable and archival is ``INSERT OR IGNORE``, so a committed id
         # never needs re-serializing. This turns the per-iteration
         # re-archival of the whole transcript (O(n²) over a session) into an
-        # incremental delta. Cleared only when the cache is invalidated (we
-        # never drop it: an id, once written, stays written in the store).
+        # incremental delta. The set only grows for the session's lifetime;
+        # it is bounded by the number of distinct ids and reclaimed when the
+        # host drops the manager (e.g. gateway session eviction).
         self._archived_ids: set[str] = set()
 
     async def _wait(self, awaitable):

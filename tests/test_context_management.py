@@ -755,8 +755,8 @@ async def test_archive_only_serializes_new_messages():
     await manager.archive(state)
     await manager.archive(state)
 
-    # The second archive of an unchanged transcript touches the store not at
-    # all — no re-serialization, no lock acquisition.
+    # The second archive of an unchanged transcript issues no further
+    # store.archive call — no re-serialization, no lock acquisition.
     assert store.archive_batches == [[first.id]]
 
     second = UserMessage(role="user", content="second")
@@ -765,3 +765,41 @@ async def test_archive_only_serializes_new_messages():
 
     # Only the delta is re-serialized; the already-archived message is skipped.
     assert store.archive_batches == [[first.id], [second.id]]
+
+
+class _FlakyArchiveStore(_RecordingArchiveStore):
+    """Fails the next ``archive`` call, then succeeds."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail_next = False
+
+    async def archive(self, session_id, messages):
+        if self.fail_next:
+            self.fail_next = False
+            raise OSError("disk full")
+        await super().archive(session_id, messages)
+
+
+async def test_archive_retries_ids_after_a_failed_write():
+    """§5.3: a failed/timed-out archival must not mark its ids as committed.
+
+    The watermark is updated only after ``store.archive`` returns, so an id
+    whose write failed is re-submitted on the next call rather than being
+    silently dropped from the canonical store.
+    """
+    store = _FlakyArchiveStore()
+    manager = ContextManager(ContextOptions(store), create_config())
+    message = UserMessage(role="user", content="only once")
+    state = AgentState(messages=[message])
+
+    store.fail_next = True
+    with pytest.raises(OSError):
+        await manager.archive(state)
+
+    # Nothing committed on the failure...
+    assert store.archive_batches == []
+
+    # ...so the retry re-submits the same id exactly once.
+    await manager.archive(state)
+    assert store.archive_batches == [[message.id]]
