@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from .types import (
@@ -13,6 +14,11 @@ from .types import (
 
 def _new_id() -> str:
     return str(uuid4())
+
+
+def now_iso() -> str:
+    """UTC ISO-8601 timestamp for audit entries, shared across the runtime."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 def create_config(
