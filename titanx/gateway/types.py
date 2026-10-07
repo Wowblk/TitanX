@@ -34,13 +34,23 @@ class GatewayOptions:
       misbehaving frontend) cannot grow the dict without limit. Idle
       sessions past TTL are evicted on the next access; the limit is
       a hard LRU cap.
+
+    - ``create_runtime`` — builds a session's runtime on a session miss.
+      A factory may declare a third parameter to receive the decoded
+      request body (the ``POST /api/chat`` payload), which is how a host
+      gets per-request credentials (a bearer token, an end-user id) into
+      the runtime. Two-parameter factories are detected and called with
+      the historical ``(session_id, hooks)`` signature.
     """
 
     port: int = 3000
     api_key: str | None = None
     storage: StorageBackend | None = None
     retriever: HybridRetriever | None = None
-    create_runtime: Callable[[str, RuntimeHooks], AgentRuntime | Awaitable[AgentRuntime]] = None  # type: ignore[assignment]
+    create_runtime: Callable[
+        ...,
+        AgentRuntime | Awaitable[AgentRuntime],
+    ] = None  # type: ignore[assignment]
     # Tighten these defaults at deploy time. ``["*"]`` is dev-only.
     allowed_origins: list[str] = field(default_factory=lambda: ["*"])
     allowed_methods: list[str] = field(default_factory=lambda: ["GET", "POST"])

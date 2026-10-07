@@ -31,14 +31,42 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable, Union
 
 from .types import GatewayOptions, SessionEntry
 from ..runtime import AgentRuntime
 from ..types import RuntimeHooks
 
 
-CreateRuntime = Callable[[str, RuntimeHooks], "AgentRuntime | Awaitable[AgentRuntime]"]
+# A factory may declare two or three parameters. The optional third is the
+# decoded request body: a host that needs per-request data (a bearer token,
+# an end-user id) to build the runtime reads it there. Which form a given
+# factory uses is discovered by inspecting its signature, so existing
+# two-parameter factories keep working unchanged.
+CreateRuntime = Union[
+    Callable[[str, RuntimeHooks], "AgentRuntime | Awaitable[AgentRuntime]"],
+    Callable[[str, RuntimeHooks, dict[str, Any]], "AgentRuntime | Awaitable[AgentRuntime]"],
+]
+
+
+def _accepts_request_context(create: CreateRuntime) -> bool:
+    """Whether ``create`` takes the optional third (request context) argument."""
+    try:
+        parameters = inspect.signature(create).parameters.values()
+    except (TypeError, ValueError):
+        # Builtins and some C callables expose no signature; assume the
+        # legacy two-parameter shape rather than risk mis-calling it.
+        return False
+    positionals = 0
+    for parameter in parameters:
+        if parameter.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            positionals += 1
+        elif parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+            return True
+    return positionals >= 3
 
 
 class SessionCapacityError(RuntimeError):
@@ -76,7 +104,10 @@ class SessionRegistry:
         session_id: str,
         create: CreateRuntime,
         hooks: RuntimeHooks,
+        request_context: dict[str, Any] | None = None,
     ) -> SessionEntry:
+        # ``request_context`` is the decoded request body, forwarded only to
+        # factories that declare a third parameter. See ``CreateRuntime``.
         # Fast path: hit and not idle-expired.
         existing = self.get(session_id)
         if existing is not None:
@@ -104,7 +135,11 @@ class SessionRegistry:
                         )
                     victims.append(victim)
 
-                runtime_or_coro = create(session_id, hooks)
+                runtime_or_coro = (
+                    create(session_id, hooks, request_context)
+                    if _accepts_request_context(create)
+                    else create(session_id, hooks)
+                )
                 if inspect.isawaitable(runtime_or_coro):
                     runtime = await runtime_or_coro
                 else:

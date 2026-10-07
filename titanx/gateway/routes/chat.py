@@ -118,6 +118,11 @@ def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter
                 session_id,
                 options.create_runtime,
                 hooks,
+                # The decoded request body is the only place a host can get
+                # per-request credentials (bearer token, end-user id) at the
+                # moment the runtime is built. Consumed only by factories
+                # that declare a third parameter.
+                request_context=body,
             )
         except SessionCapacityError as exc:
             return JSONResponse({"error": str(exc)}, status_code=503)
