@@ -7,6 +7,12 @@ Claude Agent SDK、LangGraph / Deep Agents、Google ADK、OpenHands SDK 的官�
 横向基准，没有据此宣称任何框架的准确率、成本或延迟优于另一框架。在线文档会变化，
 示例和参数不能跨 Python、TypeScript 或不同版本直接套用。本轮只增加调研文档。
 
+> **状态表已过时（superseded）：** 下文的“当前代码确认了什么”状态表描述
+> 2026-09-08 集成前的 TitanX 状态。归档、工具结果转存、回查、任务状态、结构化
+> 摘要与 `LlmCompactionStrategy` 随后已接入，现行状态见
+> [context-management.md](context-management.md) 与
+> [unified-entrypoint.md](unified-entrypoint.md)。
+
 ## 判断
 
 TitanX 的设计方向合理，已有可解释、可测试的压缩基础；面向长时间、多工具任务，

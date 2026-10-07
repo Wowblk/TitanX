@@ -44,7 +44,7 @@ SDK 使用 `LlmCompactionStrategy(llm)`。只配置 ContextOptions 也能归档�
 6. 模型需要末尾精确值时，提交 `context_read(kind="artifact", id=..., offset=..., limit=...)`。
    原工具已经执行完毕，此处只读存储。
 
-可运行示例 `demo_context.py` 的实测输出：工具结果 **44,017 → 418 字符**，
+可运行示例 `demo_context.py` 的实测输出：工具结果 **44,017 → 1,150 字符**，
 分页读回 `EXACT_RESULT=9182`，经过三次压缩后仍能检索原文，原始工具执行次数为 **1**。
 该结果使用确定性模型替身验证执行路径，不是对真实模型的准确率测量。
 

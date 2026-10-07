@@ -180,7 +180,9 @@ if self.state.pending_approval is not None or self.state.pending_tool_calls:
 - 原批次和原模型轮次完成后，新 `run_prompt()` 正常接收输入并重置新轮次预算。
 - 原运行任务被取消且现有取消清理完成后，待审批与批次被清空，允许新 prompt。
 
-只读取状态进行前置判断，不修改 `resume()`、审批策略或 Gateway 的会话锁。
+前置判断只读取状态，不改变审批策略或 Gateway 的会话锁。`resume()` 现在与
+`run_prompt()` 共用 `_exclusive_execution` 守卫：同一运行时的重叠执行会在改动
+状态前被拒绝（在审批钩子内从同一任务发起 `resume()` 除外）。
 这不是为 SDK 增加通用并发锁：模型仍在响应但尚未产生工具批次时，多任务
 同时操作同一运行时仍需要宿主串行化；本次不扩大线程安全承诺。
 
