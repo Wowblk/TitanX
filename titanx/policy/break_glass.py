@@ -153,20 +153,21 @@ class BreakGlassController:
         """
         await self.revoke(reason="controller shutdown — auto-revoked")
 
-    def dispose(self) -> None:
-        """Deprecated. Cancels the TTL timer **without** rolling back.
+    async def dispose(self) -> None:
+        """Roll back any active session and stop the TTL timer.
 
-        Retained for source-compat with hosts that called the historical
-        API. Calling this on an active session leaves the relaxed policy
-        in place — exactly the foot-gun the controller was supposed to
-        prevent. New code should call ``revoke()`` (async) or
-        ``aclose()`` (async). A ``DeprecationWarning`` would be ideal but
-        we don't pull in ``warnings`` here to keep the import surface
-        minimal; the docstring + audit log are the source of truth.
+        The historical ``dispose()`` only cancelled the TTL timer and left
+        the relaxed policy in place — a foot-gun for hosts that used it as
+        a teardown hook, since disposing quietly left the system more
+        permissive forever. It now funnels into the same locked rollback
+        path as ``revoke()`` / ``aclose()``, so disposing can never leave
+        elevated permissions live.
+
+        Idempotent and safe when break-glass was never granted: with no
+        active session (or after one has already been rolled back) this is
+        a no-op.
         """
-        if self._task and not self._task.done():
-            self._task.cancel()
-            self._task = None
+        await self.revoke(reason="dispose() — policy rolled back")
 
     # ── internal ────────────────────────────────────────────────────────
 
