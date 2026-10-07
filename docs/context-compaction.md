@@ -14,8 +14,9 @@
 | 2：旧摘要不断累积 | 生成的摘要是 system 消息，每次都永久保留，且不进入下一次摘要输入 | 旧摘要和可压缩历史一起合并，成功后只保留一份新摘要；原始系统指令保留 |
 | 3：当前输入未检查 | 使用上一轮 `last_input_tokens`，遗漏新用户输入、模型输出和工具结果 | 每次主模型调用前估算当前完整输入，压缩后再次检查；仍不满足预算就停止 |
 
-启用条件已放宽为只需配置 `compaction_options`；若未同时提供
-`compaction_strategy`，运行时会自动创建 `LlmCompactionStrategy`（`runtime.py`）。
+启用条件已放宽为配置 `context_options` 与 `compaction_options`（压缩需要上下文
+管理来承载归档与转存）；若未提供 `compaction_strategy`，运行时会自动创建
+`LlmCompactionStrategy`（`runtime.py`）。
 未启用压缩的运行时仍不会被强行添加预算，也没有更换宿主的模型或摘要策略。
 
 ## 问题 2：完整触发过程

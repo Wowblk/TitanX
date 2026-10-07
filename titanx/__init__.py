@@ -19,7 +19,8 @@ from .policy import AgentPolicy, AuditLog, BreakGlassController, PolicyStore
 from .policy.execution import ApprovalGrant, ExecutionAuthorizationError, ExecutionGuard, ExecutionGuardOptions, ToolIntent
 from .context import (
     CompactionOptions, CompactionStrategy, ContextOptions, ContextStore,
-    SQLiteContextStore, LlmCompactionStrategy, StructuredSummary, SummaryItem,
+    ContextStoreClosedError, SQLiteContextStore, LlmCompactionStrategy,
+    StructuredSummary, SummaryItem,
 )
 from .resilience import CircuitBreaker, ResilientOptions, ResilientSandboxBackend
 from .gateway import (
@@ -71,7 +72,8 @@ __all__ = [
     "OutboundRule", "audit_log_egress_hook",
     "AgentPolicy", "AuditLog", "BreakGlassController", "PolicyStore",
     "CompactionOptions", "CompactionStrategy",
-    "TaskState", "ContextOptions", "ContextStore", "SQLiteContextStore",
+    "TaskState", "ContextOptions", "ContextStore", "ContextStoreClosedError",
+    "SQLiteContextStore",
     "LlmCompactionStrategy", "StructuredSummary", "SummaryItem",
     "CircuitBreaker", "ResilientOptions", "ResilientSandboxBackend",
     "GatewayOptions", "SessionCapacityError", "create_gateway", "run_gateway",

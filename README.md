@@ -499,7 +499,7 @@ await bg.revoke("operator complete")
 await bg.aclose()
 ```
 
-`dispose()` is **async** and now funnels into the same locked rollback path as `revoke()` / `aclose()`, so it can never leave elevated permissions live — it is idempotent and a no-op when no session is active. Prefer `revoke()` / `aclose()` for new code. `ttl_ms <= 0` and non-int values raise immediately. Manual revoke and TTL expiry are mutually exclusive (one lock); they cannot double-rollback or double-audit.
+`dispose()` is **async** and now funnels into the same locked rollback path as `revoke()` / `aclose()`, so it can never leave elevated permissions live — it is idempotent and a no-op when no session is active. It **must be awaited**: a bare `bg.dispose()` returns a coroutine that never runs, leaving the policy un-rolled-back. Prefer `revoke()` / `aclose()` for new code. `ttl_ms <= 0` and non-int values raise immediately. Manual revoke and TTL expiry are mutually exclusive (one lock); they cannot double-rollback or double-audit.
 
 #### Audit fan-out
 

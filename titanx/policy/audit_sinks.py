@@ -50,12 +50,16 @@ def storage_secondary_sink(
     ``StorageBackend``'s schema). When ``session_id`` is None the
     adapter writes ``None``, matching the legacy save_log signature.
 
-    The stored ``data`` payload is the **full** canonical audit record —
-    the same ``{"schema": ..., **asdict(entry)}`` shape the JSONL writer
-    emits — with the execution/authorisation fields from ``details``
-    (``execution_id``, ``run_id``, ``batch_id``, ``ordinal``,
-    ``policy_epoch``, ...) promoted to the top level so the secondary
-    store is queryable on them rather than a lossy subset (Q20).
+    The stored ``data`` payload is a **superset** of the canonical audit
+    record: it carries the same ``{"schema": ..., **asdict(entry)}`` fields
+    the JSONL writer emits, *plus* the execution/authorisation fields from
+    ``details`` (``execution_id``, ``run_id``, ``batch_id``, ``ordinal``,
+    ``policy_epoch``, ...) promoted to the top level so the secondary store
+    is queryable on them rather than a lossy subset (Q20). Because those
+    fields are promoted, the mirrored row has extra top-level keys versus
+    the JSONL record — additive, and the nested ``details`` mapping is still
+    present unchanged; code diffing the two streams should expect the
+    superset.
     """
 
     async def _sink(entry: AuditEntry) -> None:

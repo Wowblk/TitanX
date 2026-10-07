@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from copy import deepcopy
 from dataclasses import replace
 
@@ -107,6 +108,25 @@ async def test_operation_after_close_raises_context_store_closed_error(tmp_path)
         await store.archive("session", [message])
     with pytest.raises(ContextStoreClosedError):
         await store.search("session", "after")
+
+
+async def test_closed_error_is_exported_and_legacy_catchable(tmp_path):
+    """The typed error is reachable from the package and keeps the old contract.
+
+    Hosts were told to catch ``ContextStoreClosedError``; that is only
+    actionable if it is importable, and it must remain a ``sqlite3.
+    ProgrammingError`` so existing handlers keyed on the driver error keep
+    matching.
+    """
+    from titanx import ContextStoreClosedError as Exported
+
+    assert Exported is ContextStoreClosedError
+    assert issubclass(ContextStoreClosedError, sqlite3.ProgrammingError)
+
+    store = SQLiteContextStore(tmp_path / "context.sqlite")
+    await store.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        await store.archive("session", [UserMessage(role="user", content="x")])
 
 
 async def test_cancelled_operation_does_not_wedge_store(tmp_path):

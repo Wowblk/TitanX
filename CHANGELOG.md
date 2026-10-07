@@ -99,11 +99,15 @@ always be flagged in the **Changed** / **Removed** sections.
   empty tool list, so a runtime constructed before discovery surfaces the
   mistake at construction rather than silently dispatching `unknown_tool`
   (`docs/design-review-2026-10-07.md` problem #8).
-- **Context store close/cancel hardening** — `SQLiteContextStore` raises a typed
-  `ContextStoreClosedError` (a `sqlite3.ProgrammingError` subclass) for
-  operations after `close()`, re-checks the closed flag under its lock, and makes
-  `close()` idempotent, so a cancelled/timed-out caller cannot wedge the store
-  (`docs/design-review-2026-10-07.md` problem #9).
+- **Context store close hardening** — `SQLiteContextStore` raises a typed
+  `ContextStoreClosedError` (a `sqlite3.ProgrammingError` subclass, now exported
+  from `titanx`/`titanx.context`) for operations after `close()`, re-checks the
+  closed flag under its lock so a worker queued before `close()` fails with that
+  same typed error instead of a raw driver error, and makes `close()` idempotent.
+  The single write lock still serializes sessions, and a cancelled caller's
+  `to_thread` worker still runs to completion — it releases the lock when it
+  returns, so the store is not permanently wedged, but cancellation does not stop
+  the in-flight transaction (`docs/design-review-2026-10-07.md` problem #9).
 - **PTL drops the group the configured tokenizer ranks largest** —
   `ContextCompactor` victim selection now uses `options.token_estimator` rather
   than a byte-size estimate, and no longer deep-copies the frozen config on every
