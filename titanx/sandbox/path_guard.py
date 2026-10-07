@@ -363,14 +363,21 @@ def _scan_segment(tokens: list[str], *, cwd: str | None) -> ShellWriteScan:
             bool_longs = _WRAPPER_BOOL_LONGS.get(verb, frozenset())
             known_longs = value_longs | bool_longs
             i = 0
+            after_ddash = False
             while i < len(rest):
                 tok = rest[i]
-                if tok == "--":
-                    # End of wrapper options — but `env` still allows
-                    # NAME=value assignments after it, so keep scanning
-                    # rather than treating the next token as the command.
+                if tok == "--" and not after_ddash:
+                    # End of wrapper options. `env` still accepts NAME=value
+                    # assignments after it; for every other wrapper the next
+                    # token is the wrapped command.
+                    after_ddash = True
                     i += 1
                     continue
+                if after_ddash:
+                    if verb == "env" and _ENV_ASSIGN_RE.match(tok):
+                        i += 1
+                        continue
+                    break  # the command starts here
                 if tok == "-":
                     # GNU `env` treats a lone `-` as `-i`; it is an option,
                     # not the wrapped command.
@@ -539,7 +546,8 @@ VerbHandler = Callable[..., tuple[list[str], str | None]]
 _TARGET_DIR_LONGS = frozenset({"target-directory"})
 _IN_PLACE_LONGS = frozenset({"in-place"})
 _TAR_LONG_OPTIONS = frozenset({
-    "extract", "get", "create", "append", "update", "concatenate", "file",
+    "extract", "get", "create", "append", "update", "concatenate", "delete",
+    "file",
 })
 
 
@@ -667,6 +675,11 @@ def _h_sed(tokens: list[str], *, cwd: str | None):
         if tok in ("-e", "-f"):
             j += 2
             continue
+        if tok == "--":
+            # End of options: every remaining token is a file operand
+            # (even one that starts with `-`).
+            files.extend(tokens[j + 1:])
+            break
         if tok.startswith("--"):
             # `--in-place` / `--in-place=.bak`, and any unambiguous getopt
             # abbreviation (`--in-pl`) that GNU sed accepts.
@@ -709,6 +722,30 @@ def _h_sed(tokens: list[str], *, cwd: str | None):
 _WGET_VALUE_SHORTS = frozenset("OoaiPUetTw")
 _CURL_VALUE_SHORTS = frozenset("AbcdeEFHKmoPqrRTuUwxXyzY")
 
+# Options whose write target is a *remote-derived* filename (curl -O/-J,
+# wget's default). The name is chosen by the server, so it cannot be
+# statically resolved — such a write is refused rather than passed.
+_CURL_REMOTE_NAME_LONGS = frozenset({
+    "remote-name", "remote-name-all", "remote-header-name",
+})
+_WGET_SPIDER_LONGS = frozenset({"spider"})
+
+
+def _has_short(tokens: list[str], letter: str, value_shorts: frozenset[str]) -> bool:
+    """True if short option ``letter`` appears (fused, bundled, or separate)."""
+    return any(
+        _cluster_value(tok, letter, value_shorts)[0] for tok in tokens[1:]
+    )
+
+
+def _has_long(tokens: list[str], names: frozenset[str]) -> bool:
+    """True if any long option in ``names`` appears, abbreviation-aware."""
+    for tok in tokens[1:]:
+        split = _split_long(tok)
+        if split is not None and _abbrev(split[0], names)[0] is not None:
+            return True
+    return False
+
 
 def _output_target(
     tokens: list[str], *, letter: str, long_name: str,
@@ -750,17 +787,58 @@ def _output_target(
 
 
 def _h_wget(tokens: list[str], *, cwd: str | None):
-    return _output_target(
+    # `-O`/`--output-document` names the downloaded file.
+    targets, refuse = _output_target(
         tokens, letter="O", long_name="output-document",
         value_shorts=_WGET_VALUE_SHORTS, label="wget -O", cwd=cwd,
     )
+    if refuse:
+        return [], refuse
+    # `-o`/`--output-file` (log) and `-P`/`--directory-prefix` (destination
+    # directory) are write targets too.
+    for letter, lname in (("o", "output-file"), ("P", "directory-prefix")):
+        extra, refuse = _output_target(
+            tokens, letter=letter, long_name=lname,
+            value_shorts=_WGET_VALUE_SHORTS, label=f"wget -{letter}", cwd=cwd,
+        )
+        if refuse:
+            return [], refuse
+        targets.extend(extra)
+    # Without `-O`, wget writes the server-chosen name into the destination
+    # directory — unnamed, so refuse (unless it only spiders).
+    has_operand = any(not t.startswith("-") for t in tokens[1:])
+    if not targets and not _has_long(tokens, _WGET_SPIDER_LONGS) and has_operand:
+        return [], (
+            "wget downloads to a remote-derived filename that cannot be "
+            "statically named — refusing"
+        )
+    return targets, None
 
 
 def _h_curl(tokens: list[str], *, cwd: str | None):
-    return _output_target(
+    targets, refuse = _output_target(
         tokens, letter="o", long_name="output",
         value_shorts=_CURL_VALUE_SHORTS, label="curl -o", cwd=cwd,
     )
+    if refuse:
+        return [], refuse
+    # `-O`/`--remote-name[(-all)]`/`-J`/`--remote-header-name` write the
+    # server-chosen filename — unnamed, so refuse.
+    if _has_short(tokens, "O", _CURL_VALUE_SHORTS) or _has_short(
+        tokens, "J", _CURL_VALUE_SHORTS
+    ) or _has_long(tokens, _CURL_REMOTE_NAME_LONGS):
+        return [], (
+            "curl writes to a remote-derived filename that cannot be "
+            "statically named — refusing"
+        )
+    # `--output-dir DIR` is the directory the download lands in.
+    dir_targets, refuse = _output_target(
+        tokens, letter="\x00", long_name="output-dir",
+        value_shorts=frozenset(), label="curl --output-dir", cwd=cwd,
+    )
+    if refuse:
+        return [], refuse
+    return [*targets, *dir_targets], None
 
 
 def _h_tar(tokens: list[str], *, cwd: str | None):
@@ -817,7 +895,8 @@ def _h_tar(tokens: list[str], *, cwd: str | None):
             canon, _ = _abbrev(name[2:], _TAR_LONG_OPTIONS)
             if canon in ("extract", "get"):
                 extract = True
-            elif canon in ("create", "append", "update", "concatenate"):
+            elif canon in ("create", "append", "update", "concatenate",
+                           "delete"):
                 write_mode = True
             elif canon == "file":
                 if value:
