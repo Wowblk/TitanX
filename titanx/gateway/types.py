@@ -36,11 +36,13 @@ class GatewayOptions:
       a hard LRU cap.
 
     - ``create_runtime`` — builds a session's runtime on a session miss.
-      A factory may declare a third parameter to receive the decoded
-      request body (the ``POST /api/chat`` payload), which is how a host
-      gets per-request credentials (a bearer token, an end-user id) into
-      the runtime. Two-parameter factories are detected and called with
-      the historical ``(session_id, hooks)`` signature.
+      A factory that needs per-request data (a bearer token, an end-user
+      id) opts in by naming a parameter ``request_context``; it receives
+      the decoded request body — the ``POST /api/chat`` payload, or the
+      first WS frame. Factories without that parameter are called with
+      the historical ``(session_id, hooks)`` signature. Note the body is
+      consulted only when the session is *created*; a later request
+      reusing the same ``session_id`` reaches the existing runtime.
     """
 
     port: int = 3000

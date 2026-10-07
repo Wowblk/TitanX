@@ -540,11 +540,7 @@ class AgentRuntime:
                     self.state.signal = "stop"
                     await self._finish_loop("pending_approval")
                     break
-                if outcome == "return_direct":
-                    # The pipeline already committed the tool output as the
-                    # final assistant message and set ``signal``; close the
-                    # turn like a plain text response.
-                    await self._finish_loop("completed")
+                if await self._finish_return_direct(outcome):
                     break
                 # Batch fully drained — fall through to next iteration so the
                 # LLM gets called with a complete tool-result history.
@@ -655,16 +651,26 @@ class AgentRuntime:
                 self.state.signal = "stop"
                 await self._finish_loop("pending_approval")
                 break
-            if outcome == "return_direct":
-                # The pipeline already committed the tool output as the final
-                # assistant message and set ``signal``; close the turn like a
-                # plain text response.
-                await self._finish_loop("completed")
+            if await self._finish_return_direct(outcome):
                 break
 
             self.state.last_response_type = "none"
 
         return self.state
+
+    async def _finish_return_direct(self, outcome: str) -> bool:
+        """Close a turn the pipeline already answered via ``return_direct``.
+
+        Both the resume path (draining a batch an approval paused) and the
+        normal path can observe this outcome; the pipeline has already
+        committed the tool output as the final assistant message and set
+        ``signal = "stop"``, so the runtime only has to end the loop the way a
+        plain text turn would. Returns whether the loop should break.
+        """
+        if outcome != "return_direct":
+            return False
+        await self._finish_loop("completed")
+        return True
 
     def _has_in_flight_batch(self) -> bool:
         return self.state.pending_tool_call_index < len(self.state.pending_tool_calls)

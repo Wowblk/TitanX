@@ -31,42 +31,47 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from typing import Any, Awaitable, Callable, Union
+from typing import Any, Awaitable, Callable
 
 from .types import GatewayOptions, SessionEntry
 from ..runtime import AgentRuntime
 from ..types import RuntimeHooks
 
 
-# A factory may declare two or three parameters. The optional third is the
-# decoded request body: a host that needs per-request data (a bearer token,
-# an end-user id) to build the runtime reads it there. Which form a given
-# factory uses is discovered by inspecting its signature, so existing
-# two-parameter factories keep working unchanged.
-CreateRuntime = Union[
-    Callable[[str, RuntimeHooks], "AgentRuntime | Awaitable[AgentRuntime]"],
-    Callable[[str, RuntimeHooks, dict[str, Any]], "AgentRuntime | Awaitable[AgentRuntime]"],
-]
+# A runtime factory takes ``(session_id, hooks)`` and may opt into the decoded
+# request body by naming a further parameter ``request_context``: a host that
+# needs per-request data (a bearer token, an end-user id) to build the runtime
+# reads it there. Opt-in is by name, not arity, so a factory with an unrelated
+# optional third parameter is never handed a body by surprise.
+CreateRuntime = Callable[..., "AgentRuntime | Awaitable[AgentRuntime]"]
+
+REQUEST_CONTEXT_PARAM = "request_context"
 
 
-def _accepts_request_context(create: CreateRuntime) -> bool:
-    """Whether ``create`` takes the optional third (request context) argument."""
+def _request_context_style(create: CreateRuntime) -> str | None:
+    """How to pass the request context to ``create``, or ``None`` if it opts out.
+
+    ``"positional"`` when the parameter can be passed third positionally,
+    ``"keyword"`` when it is keyword-only. Anything else (no such parameter, or
+    an uninspectable callable) means the factory is called the legacy way.
+    """
     try:
-        parameters = inspect.signature(create).parameters.values()
+        parameters = inspect.signature(create).parameters
     except (TypeError, ValueError):
-        # Builtins and some C callables expose no signature; assume the
-        # legacy two-parameter shape rather than risk mis-calling it.
-        return False
-    positionals = 0
-    for parameter in parameters:
-        if parameter.kind in (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        ):
-            positionals += 1
-        elif parameter.kind is inspect.Parameter.VAR_POSITIONAL:
-            return True
-    return positionals >= 3
+        # Builtins and some C callables expose no signature. Assume the legacy
+        # shape rather than risk passing an argument the factory never wanted.
+        return None
+    parameter = parameters.get(REQUEST_CONTEXT_PARAM)
+    if parameter is None:
+        return None
+    if parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+        return "keyword"
+    if parameter.kind in (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    ):
+        return "positional"
+    return None
 
 
 class SessionCapacityError(RuntimeError):
@@ -106,8 +111,17 @@ class SessionRegistry:
         hooks: RuntimeHooks,
         request_context: dict[str, Any] | None = None,
     ) -> SessionEntry:
-        # ``request_context`` is the decoded request body, forwarded only to
-        # factories that declare a third parameter. See ``CreateRuntime``.
+        """Return the session's entry, creating it via ``create`` on a miss.
+
+        ``request_context`` is the decoded request body, forwarded only to
+        factories that declare a ``request_context`` parameter; see
+        ``CreateRuntime``. It is consulted *only* when a session is created: a
+        request that reuses an existing ``session_id`` gets that session's
+        runtime and never re-runs the factory. Hosts that treat the context as
+        credentials must therefore bind a session to the caller (or rotate the
+        session id) — the registry will not notice a different token arriving
+        under the same id.
+        """
         # Fast path: hit and not idle-expired.
         existing = self.get(session_id)
         if existing is not None:
@@ -135,11 +149,15 @@ class SessionRegistry:
                         )
                     victims.append(victim)
 
-                runtime_or_coro = (
-                    create(session_id, hooks, request_context)
-                    if _accepts_request_context(create)
-                    else create(session_id, hooks)
-                )
+                style = _request_context_style(create)
+                if style == "keyword":
+                    runtime_or_coro = create(
+                        session_id, hooks, request_context=request_context
+                    )
+                elif style == "positional":
+                    runtime_or_coro = create(session_id, hooks, request_context)
+                else:
+                    runtime_or_coro = create(session_id, hooks)
                 if inspect.isawaitable(runtime_or_coro):
                     runtime = await runtime_or_coro
                 else:

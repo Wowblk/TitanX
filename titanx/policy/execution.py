@@ -96,8 +96,10 @@ class ExecutionGuard:
         for tool in tools:
             if not isinstance(tool.name, str) or not tool.name or tool.name in self._contracts:
                 raise ValueError("tool names must be nonempty and unique")
-            if type(tool.requires_approval) is not bool or type(tool.requires_sanitization) is not bool:
-                raise ValueError("tool approval and sanitization flags must be boolean")
+            if (type(tool.requires_approval) is not bool
+                    or type(tool.requires_sanitization) is not bool
+                    or type(tool.return_direct) is not bool):
+                raise ValueError("tool approval, sanitization, and return_direct flags must be boolean")
             contract = self._contract(tool)
             schema = json.loads(contract)["parameters"]
             cls = validator_for(schema, default=Draft202012Validator)

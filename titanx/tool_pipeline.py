@@ -336,13 +336,16 @@ class ToolCallPipeline:
                 # an error/blocked result still needs the LLM (or the host) to
                 # handle it. It must also be the batch's final call so ending
                 # the turn cannot strand earlier-declared calls without a
-                # matching ToolMessage. Computed last so a post-processing
-                # failure above cannot leave a half-committed short-circuit
-                # armed.
+                # matching ToolMessage, and it must carry something: an empty
+                # output is not an answer, so the turn falls through to the LLM
+                # rather than ending on an empty assistant message. Computed
+                # last so a post-processing failure above cannot leave a
+                # half-committed short-circuit armed.
                 if (
                     tool_def
                     and tool_def.return_direct
                     and not is_error
+                    and content != ""
                     and i + 1 >= len(state.pending_tool_calls)
                 ):
                     direct_output = content
@@ -370,6 +373,13 @@ class ToolCallPipeline:
                 # just committed) so a later run_prompt is not blocked by a
                 # stale, fully-consumed batch. The runtime loop observes the
                 # returned outcome and finishes with ``LoopEndEvent("completed")``.
+                #
+                # The answer is the *inspected* content, and it is deliberately
+                # not run through ``build_tool_message``'s ``<tool_output>``
+                # wrapper: this message is presented as the assistant's own
+                # final answer, so wrapping it would leak the markers into the
+                # host UI. ``content`` has already passed the output safety
+                # boundary (injection scan, optional PII redaction).
                 state.pending_tool_calls = []
                 state.pending_tool_call_index = 0
                 append_message(

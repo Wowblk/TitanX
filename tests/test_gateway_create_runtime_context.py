@@ -111,3 +111,55 @@ async def test_registry_does_not_pass_context_to_two_arg_factory() -> None:
 
     # Context is available but the factory never asked for it.
     assert calls == [("s", 2)]
+
+
+async def test_factory_with_unrelated_optional_third_param_is_not_fed_body() -> None:
+    registry = SessionRegistry(max_sessions=4, idle_ttl_seconds=0)
+    seen: list[tuple[str, object]] = []
+
+    # Opt-in is by parameter *name*, not by arity: a pre-existing factory with
+    # an unrelated third parameter must not have the request body forced into it.
+    def create(session_id, hooks, timeout=10):
+        seen.append((session_id, timeout))
+        return _make_runtime(hooks)
+
+    await registry.get_or_create("s", create, RuntimeHooks(), {"userId": "u-7"})
+
+    assert seen == [("s", 10)]
+
+
+async def test_keyword_only_request_context_param_is_passed_by_keyword() -> None:
+    registry = SessionRegistry(max_sessions=4, idle_ttl_seconds=0)
+    seen: list[object] = []
+
+    def create(session_id, hooks, *, request_context):
+        seen.append(request_context)
+        return _make_runtime(hooks)
+
+    await registry.get_or_create("s", create, RuntimeHooks(), {"userId": "u-8"})
+
+    assert seen == [{"userId": "u-8"}]
+
+
+def test_ws_route_forwards_first_frame_as_request_context() -> None:
+    seen: list[Any] = []
+
+    def create_runtime(session_id, hooks, request_context):
+        seen.append(request_context)
+        return _make_runtime(hooks)
+
+    app = create_gateway(GatewayOptions(create_runtime=create_runtime))
+    with TestClient(app) as client:
+        with client.websocket_connect("/api/chat/ws/ctx-ws") as websocket:
+            websocket.send_json(
+                {"type": "message", "message": "hi", "toolBearerToken": "ws-jwt"}
+            )
+            while True:
+                event = websocket.receive_json()
+                if event.get("type") == "stream_end":
+                    break
+
+    # The creating frame is the WS client's only chance to hand over
+    # credentials; it must reach the factory just like the SSE body does.
+    assert seen == [{"type": "message", "message": "hi", "toolBearerToken": "ws-jwt"}]
+

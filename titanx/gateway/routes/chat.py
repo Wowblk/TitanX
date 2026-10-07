@@ -278,6 +278,11 @@ def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter
                             session_id,
                             options.create_runtime,
                             hooks,
+                            # The first frame that creates the session is the
+                            # WS client's only chance to hand the factory its
+                            # credentials (a token, an end-user id), exactly as
+                            # the SSE route forwards its POST body.
+                            request_context=data,
                         )
                     except SessionCapacityError as exc:
                         await websocket.send_json({
