@@ -25,6 +25,7 @@ from .types import (
     AgentConfig,
     AgentState,
     AssistantMessage,
+    AssistantTextEvent,
     PendingApprovalEvent,
     RuntimeEvent,
     SafetyLayerLike,
@@ -67,8 +68,11 @@ class ToolCallPipeline:
         """Drain ``state``'s pending tool-call batch, cursor-style.
 
         Returns ``"pending_approval"`` if execution paused on a tool call that
-        requires human approval, otherwise ``"continue"`` once the batch has
-        been fully drained.
+        requires human approval; ``"return_direct"`` if a successful
+        ``return_direct`` tool short-circuited the turn (its output is already
+        committed as the final assistant message and ``state.signal`` is set to
+        ``"stop"``); otherwise ``"continue"`` once the batch has been fully
+        drained.
         """
         while state.pending_tool_call_index < len(state.pending_tool_calls):
             i = state.pending_tool_call_index
@@ -271,6 +275,7 @@ class ToolCallPipeline:
             # observer failure may move the cursor backwards and replay the
             # external side effect.
             state.pending_tool_call_index = i + 1
+            direct_output: str | None = None
             try:
                 self._validate_tool_execution_result(result)
 
@@ -327,6 +332,20 @@ class ToolCallPipeline:
                     tool_call_id=tool_call.id,
                     is_error=is_error,
                 ))
+                # Only a *successful* return_direct result becomes the answer;
+                # an error/blocked result still needs the LLM (or the host) to
+                # handle it. It must also be the batch's final call so ending
+                # the turn cannot strand earlier-declared calls without a
+                # matching ToolMessage. Computed last so a post-processing
+                # failure above cannot leave a half-committed short-circuit
+                # armed.
+                if (
+                    tool_def
+                    and tool_def.return_direct
+                    and not is_error
+                    and i + 1 >= len(state.pending_tool_calls)
+                ):
+                    direct_output = content
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -344,6 +363,24 @@ class ToolCallPipeline:
                     decision=check.decision,
                     reason="tool result post-processing failed safely",
                 )
+            if direct_output is not None:
+                # The tool's output *is* the answer: close the turn exactly as a
+                # plain text turn would, so the loop never asks the LLM for a
+                # second turn. Drain the queue first (the batch's last call was
+                # just committed) so a later run_prompt is not blocked by a
+                # stale, fully-consumed batch. The runtime loop observes the
+                # returned outcome and finishes with ``LoopEndEvent("completed")``.
+                state.pending_tool_calls = []
+                state.pending_tool_call_index = 0
+                append_message(
+                    state,
+                    AssistantMessage(role="assistant", content=direct_output),
+                )
+                state.last_response_type = "text"
+                state.last_text_response = direct_output
+                await self._emit(AssistantTextEvent(text=direct_output))
+                state.signal = "stop"
+                return "return_direct"
             continue
 
         # Batch drained — clear the queue so a future resume() doesn't loop.

@@ -16,6 +16,12 @@ class ToolDefinition:
     parameters: dict[str, Any]
     requires_approval: bool = False
     requires_sanitization: bool = False
+    # A ``return_direct`` tool short-circuits the loop: once its (non-error)
+    # result is committed, the runtime ends the turn using that output as the
+    # final assistant message instead of asking the LLM for a second turn to
+    # summarise it. The tool author owns the output's presentation; the SDK
+    # never rewrites it. Use for tools whose result *is* the answer.
+    return_direct: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
     # A tool with ``mandatory_approval=True`` must never be satisfied by the
     # coarse ``auto_approve_tools`` host opt-in: every call still pauses for an

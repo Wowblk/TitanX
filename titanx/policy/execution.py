@@ -163,6 +163,7 @@ class ExecutionGuard:
             "name": tool.name, "description": tool.description,
             "parameters": tool.parameters, "requires_approval": tool.requires_approval,
             "requires_sanitization": tool.requires_sanitization,
+            "return_direct": tool.return_direct,
             "mandatory_approval": tool.mandatory_approval, "metadata": tool.metadata,
         })
 

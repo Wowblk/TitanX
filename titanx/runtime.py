@@ -540,6 +540,12 @@ class AgentRuntime:
                     self.state.signal = "stop"
                     await self._finish_loop("pending_approval")
                     break
+                if outcome == "return_direct":
+                    # The pipeline already committed the tool output as the
+                    # final assistant message and set ``signal``; close the
+                    # turn like a plain text response.
+                    await self._finish_loop("completed")
+                    break
                 # Batch fully drained — fall through to next iteration so the
                 # LLM gets called with a complete tool-result history.
                 self.state.last_response_type = "none"
@@ -648,6 +654,12 @@ class AgentRuntime:
                 self.state.last_response_type = "need_approval"
                 self.state.signal = "stop"
                 await self._finish_loop("pending_approval")
+                break
+            if outcome == "return_direct":
+                # The pipeline already committed the tool output as the final
+                # assistant message and set ``signal``; close the turn like a
+                # plain text response.
+                await self._finish_loop("completed")
                 break
 
             self.state.last_response_type = "none"
