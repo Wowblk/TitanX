@@ -313,3 +313,82 @@ class TestWrapperPeelRegressions:
         scan = scan_shell_write_targets("env -uSSH_AUTH_SOCK cp -t /etc foo")
         assert scan.refuse_reason is None
         assert "/etc" in scan.targets
+
+
+class TestLongOptionAbbreviation:
+    """GNU wrappers/verbs parse options with ``getopt_long``, which accepts
+    any *unambiguous* prefix of a long option. The scanner matched option
+    names literally, so `env --un X bash -c …` (``--un`` = ``--unset``)
+    consumed only the option, treated ``X`` as the command, and never saw
+    the inline shell; `env --s '…'` bypassed the deliberate
+    ``--split-string`` refusal. Detection must follow the abbreviation.
+    """
+
+    @pytest.mark.parametrize("command", [
+        "env --un X bash -c 'echo x'",
+        "env --ch /tmp bash -c 'echo x'",
+        "timeout --sig KILL 5 bash -c 'echo x'",
+        "stdbuf --out L bash -c 'echo x'",
+        "xargs --delim , bash -c 'echo x'",
+        "time --out F bash -c 'echo x'",
+        "xargs --process-slot-var SLOT bash -c 'echo x'",
+    ])
+    def test_abbreviated_value_option_does_not_hide_shell(self, command: str) -> None:
+        scan = scan_shell_write_targets(command)
+        assert scan.refuse_reason is not None, f"{command!r} was not refused"
+
+    @pytest.mark.parametrize("command,expected", [
+        ("env --un X cp -t /etc foo", "/etc"),
+        ("timeout --sig KILL 5 cp -t /etc foo", "/etc"),
+        ("stdbuf --out L tee /etc/x", "/etc/x"),
+        ("xargs --delim , cp -t /etc foo", "/etc"),
+        ("xargs --process-slot-var SLOT tee /etc/x", "/etc/x"),
+    ])
+    def test_abbreviated_value_option_still_detects_target(
+        self, command: str, expected: str
+    ) -> None:
+        scan = scan_shell_write_targets(command)
+        assert scan.refuse_reason is None
+        assert expected in scan.targets
+
+    @pytest.mark.parametrize("command", [
+        "env --split-s 'bash -c \"echo hi\"'",
+        "env --s 'bash -c \"echo hi\"'",
+        "env --sp 'bash -c \"echo hi\"'",
+    ])
+    def test_abbreviated_split_string_is_refused(self, command: str) -> None:
+        # `--split-string` is the only `env` long option starting with `s`;
+        # every prefix re-splits its argument into a hidden command.
+        assert scan_shell_write_targets(command).refuse_reason is not None
+
+    @pytest.mark.parametrize("command,expected", [
+        ("curl --out /etc/x http://h/", "/etc/x"),
+        ("wget --output-doc /etc/x http://h/", "/etc/x"),
+        ("cp --target-dir=/etc foo", "/etc"),
+        ("sed --in-pl 's/a/b/' /etc/passwd", "/etc/passwd"),
+    ])
+    def test_verb_long_option_abbreviations_are_detected(
+        self, command: str, expected: str
+    ) -> None:
+        scan = scan_shell_write_targets(command)
+        assert scan.refuse_reason is None
+        assert expected in scan.targets
+
+    @pytest.mark.parametrize("command", [
+        "env --frobnicate bash",          # unrecognised
+        "xargs --max 1 bash -c 'echo x'",  # --max{,-args,-procs,-chars,-lines}
+    ])
+    def test_unknown_or_ambiguous_wrapper_long_is_refused(self, command: str) -> None:
+        # Arity of an unrecognised/ambiguous long option is unknowable;
+        # guessing "no value" is how the real command hides behind it.
+        assert scan_shell_write_targets(command).refuse_reason is not None
+
+    def test_benign_wrapper_long_flags_are_not_refused(self) -> None:
+        # Enumerated boolean long options must still peel.
+        for command in (
+            "env --ignore-environment curl -o /tmp/x http://h/",
+            "timeout --foreground 5 curl -o /tmp/x http://h/",
+            "xargs --no-run-if-empty echo x",
+        ):
+            scan = scan_shell_write_targets(command)
+            assert scan.refuse_reason is None, f"{command!r} was refused"

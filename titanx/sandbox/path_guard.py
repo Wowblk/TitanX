@@ -97,16 +97,79 @@ _WRAPPER_VALUE_SHORTS: dict[str, frozenset[str]] = {
     "time": frozenset({"f", "o"}),
     "xargs": frozenset({"a", "E", "I", "L", "n", "P", "s", "d"}),
 }
+# Long options that consume a *separate* argument. Stored WITHOUT the
+# leading dashes; resolution goes through :func:`_abbrev` so that
+# getopt_long abbreviations (`--sig` for `--signal`) are honoured — matching
+# the literal spelling only let `env --un X bash -c …` hide the inline shell.
+# NOTE: GNU optional-argument options (`--eof[=X]`, `--replace[=X]`,
+# `--max-lines[=X]`, env's `--block-signal[=SIG]`) do NOT consume a
+# separate token in their bare form, so they belong in the boolean table.
 _WRAPPER_VALUE_LONGS: dict[str, frozenset[str]] = {
-    "env": frozenset({"--unset", "--chdir", "--split-string"}),
-    "nice": frozenset({"--adjustment"}),
-    "timeout": frozenset({"--signal", "--kill-after"}),
-    "stdbuf": frozenset({"--input", "--output", "--error"}),
-    "time": frozenset({"--format", "--output"}),
-    "xargs": frozenset({"--arg-file", "--eof", "--replace", "--max-lines",
-                        "--max-args", "--max-procs", "--max-chars",
-                        "--delimiter"}),
+    "env": frozenset({"unset", "chdir", "split-string", "argv0"}),
+    "nice": frozenset({"adjustment"}),
+    "timeout": frozenset({"signal", "kill-after"}),
+    "stdbuf": frozenset({"input", "output", "error"}),
+    "time": frozenset({"format", "output"}),
+    "xargs": frozenset({"arg-file", "max-args", "max-procs", "max-chars",
+                        "delimiter", "process-slot-var"}),
 }
+
+# Long options that take NO separate argument. Enumerated so a benign flag
+# (`env --ignore-environment …`) still peels, while a wrapper long option
+# that is unknown to us falls through to a hard refuse — the option's arity
+# is exactly what we cannot determine, and guessing wrong is how a value
+# gets mistaken for the wrapped command.
+_WRAPPER_BOOL_LONGS: dict[str, frozenset[str]] = {
+    "env": frozenset({"ignore-environment", "null", "debug",
+                      "block-signal", "default-signal", "ignore-signal",
+                      "list-signal-handling", "help", "version"}),
+    "nice": frozenset({"help", "version"}),
+    "nohup": frozenset({"help", "version"}),
+    "setsid": frozenset({"fork", "ctty", "wait", "help", "version"}),
+    "timeout": frozenset({"foreground", "preserve-status", "verbose",
+                          "help", "version"}),
+    "stdbuf": frozenset({"help", "version"}),
+    "time": frozenset({"append", "verbose", "portability", "quiet",
+                       "help", "version"}),
+    "xargs": frozenset({"null", "show-limits", "interactive", "verbose",
+                        "exit", "open-tty", "no-run-if-empty",
+                        # optional-argument options: bare form takes no
+                        # separate token.
+                        "eof", "replace", "max-lines", "help", "version"}),
+}
+
+
+def _split_long(tok: str) -> tuple[str, str | None] | None:
+    """Split a ``--name`` / ``--name=value`` token.
+
+    Returns ``(name, inline_value_or_None)`` (name without dashes), or
+    ``None`` when ``tok`` is not a long option.
+    """
+    if not tok.startswith("--") or len(tok) <= 2:
+        return None
+    body = tok[2:]
+    name, sep, value = body.partition("=")
+    return name, (value if sep else None)
+
+
+def _abbrev(name: str, options: frozenset[str]) -> tuple[str | None, bool]:
+    """Resolve a long-option ``name`` (dashless) against ``options``.
+
+    Mirrors glibc ``getopt_long``: an exact match wins, otherwise an
+    unambiguous prefix resolves. Returns ``(canonical, ambiguous)``;
+    ``canonical`` is ``None`` when nothing matches and ``ambiguous`` is
+    ``True`` when the prefix matches more than one option.
+    """
+    if not name:
+        return None, False
+    if name in options:
+        return name, False
+    hits = [o for o in options if o.startswith(name)]
+    if len(hits) == 1:
+        return hits[0], False
+    if len(hits) > 1:
+        return None, True
+    return None, False
 
 # A wrapper duration/argument operand (`timeout 5`, `timeout 5s`,
 # `nice 10`). Skipped when locating the wrapped command.
@@ -297,6 +360,8 @@ def _scan_segment(tokens: list[str], *, cwd: str | None) -> ShellWriteScan:
             rest = cmd[1:]
             value_shorts = _WRAPPER_VALUE_SHORTS.get(verb, frozenset())
             value_longs = _WRAPPER_VALUE_LONGS.get(verb, frozenset())
+            bool_longs = _WRAPPER_BOOL_LONGS.get(verb, frozenset())
+            known_longs = value_longs | bool_longs
             i = 0
             while i < len(rest):
                 tok = rest[i]
@@ -312,19 +377,36 @@ def _scan_segment(tokens: list[str], *, cwd: str | None) -> ShellWriteScan:
                     i += 1
                     continue
                 if tok.startswith("--"):
-                    if verb == "env" and (
-                        tok == "--split-string" or tok.startswith("--split-string=")
-                    ):
+                    split = _split_long(tok)
+                    assert split is not None
+                    name, inline = split
+                    canon, ambiguous = _abbrev(name, known_longs)
+                    if ambiguous:
+                        # getopt_long would reject this too; we cannot tell
+                        # the arity, so fail closed.
+                        return ShellWriteScan(refuse_reason=(
+                            f"wrapper {verb!r} long option {tok!r} is an "
+                            f"ambiguous abbreviation — refusing"
+                        ))
+                    if canon == "split-string":
                         return ShellWriteScan(refuse_reason=(
                             "env --split-string re-splits its argument into a "
                             "command that cannot be statically analysed"
                         ))
-                    if "=" in tok:
-                        i += 1  # --opt=value, self-contained
-                    elif tok in value_longs:
-                        i += 2  # --opt value
+                    if canon in value_longs:
+                        i += 1 if inline is not None else 2  # --opt[=]value
+                    elif canon in bool_longs:
+                        i += 1  # --flag
+                    elif inline is not None:
+                        i += 1  # --unknown=value, self-contained
                     else:
-                        i += 1
+                        # An unrecognised long option on a wrapper: its arity
+                        # is unknowable, and guessing "no value" would let the
+                        # real command hide behind it.
+                        return ShellWriteScan(refuse_reason=(
+                            f"wrapper {verb!r} long option {tok!r} is not "
+                            f"recognised — refusing"
+                        ))
                     continue
                 if tok.startswith("-") and len(tok) > 1:
                     body = tok[1:]
@@ -451,6 +533,15 @@ def _resolve_path(path: str, *, cwd: str | None) -> str | None:
 
 VerbHandler = Callable[..., tuple[list[str], str | None]]
 
+# Long options recognised by the per-verb handlers (dashless). Resolution
+# goes through :func:`_abbrev`, so `cp --target-dir=/etc` or `sed --in-pl`
+# are seen the same as the full spelling.
+_TARGET_DIR_LONGS = frozenset({"target-directory"})
+_IN_PLACE_LONGS = frozenset({"in-place"})
+_TAR_LONG_OPTIONS = frozenset({
+    "extract", "get", "create", "append", "update", "concatenate", "file",
+})
+
 
 def _h_tee(tokens: list[str], *, cwd: str | None):
     j = 1
@@ -475,27 +566,41 @@ def _h_cp_mv_install(
     j = 1
     while j < len(tokens):
         tok = tokens[j]
-        if tok in ("-t", "--target-directory"):
+        dst: str | None = None
+        next_j = j + 1
+        if tok == "-t":
             if j + 1 >= len(tokens):
-                return [], f"{tok} requires a directory argument"
-            dst, j = tokens[j + 1], j + 2
-        elif tok.startswith("--target-directory="):
-            dst, j = tok.split("=", 1)[1], j + 1
+                return [], "-t requires a directory argument"
+            dst, next_j = tokens[j + 1], j + 2
         else:
-            present, fused = _cluster_value(tok, "t", value_letters)
-            if not present:
-                if tok.startswith("-"):
+            split = _split_long(tok)
+            canon = None
+            if split is not None:
+                canon, _ = _abbrev(split[0], _TARGET_DIR_LONGS)
+            if canon is not None:
+                inline = split[1] if split is not None else None
+                if inline is not None:
+                    dst, next_j = inline, j + 1
+                elif j + 1 < len(tokens):
+                    dst, next_j = tokens[j + 1], j + 2
+                else:
+                    return [], "--target-directory requires a directory argument"
+            else:
+                present, fused = _cluster_value(tok, "t", value_letters)
+                if not present:
+                    if tok.startswith("-"):
+                        j += 1
+                        continue
+                    positional.append(tok)
                     j += 1
                     continue
-                positional.append(tok)
-                j += 1
-                continue
-            if fused is not None:
-                dst, j = fused, j + 1
-            elif j + 1 < len(tokens):
-                dst, j = tokens[j + 1], j + 2
-            else:
-                return [], "-t requires a directory argument"
+                if fused is not None:
+                    dst, next_j = fused, j + 1
+                elif j + 1 < len(tokens):
+                    dst, next_j = tokens[j + 1], j + 2
+                else:
+                    return [], "-t requires a directory argument"
+        j = next_j
         # `-t DIR` (in any spelling) names the destination explicitly; the
         # positional operands are then sources only. Without this branch the
         # real destination is skipped and a source operand is checked as if
@@ -562,16 +667,20 @@ def _h_sed(tokens: list[str], *, cwd: str | None):
         if tok in ("-e", "-f"):
             j += 2
             continue
-        if tok == "--in-place" or tok.startswith("--in-place="):
-            inplace = True
+        if tok.startswith("--"):
+            # `--in-place` / `--in-place=.bak`, and any unambiguous getopt
+            # abbreviation (`--in-pl`) that GNU sed accepts.
+            canon, _ = _abbrev(tok[2:].partition("=")[0], _IN_PLACE_LONGS)
+            if canon is not None:
+                inplace = True
             j += 1
             continue
         if tok.startswith("-"):
             # Every other option is a flag: short clusters (`-ni`, `-Ei`)
-            # may also carry `-i`; long options (`--regexp-extended`,
-            # `--posix`) must NOT be mistaken for file operands, which
-            # would shift the script/file split.
-            if not tok.startswith("--") and "i" in tok[1:]:
+            # may also carry `-i`; long options were handled above and must
+            # NOT be mistaken for file operands, which would shift the
+            # script/file split.
+            if "i" in tok[1:]:
                 inplace = True
             j += 1
             continue
@@ -602,45 +711,54 @@ _CURL_VALUE_SHORTS = frozenset("AbcdeEFHKmoPqrRTuUwxXyzY")
 
 
 def _output_target(
-    tokens: list[str], *, letter: str, long: str,
+    tokens: list[str], *, letter: str, long_name: str,
     value_shorts: frozenset[str], label: str, cwd: str | None,
 ):
+    long_options = frozenset({long_name})
     targets: list[str] = []
     j = 1
     while j < len(tokens):
         tok = tokens[j]
         val: str | None = None
-        consumed_next = False
-        if tok == long and j + 1 < len(tokens):
-            val, consumed_next = tokens[j + 1], True
-        elif tok.startswith(long + "="):
-            val = tok.split("=", 1)[1]
-        else:
+        next_j = j + 1
+        # `--output` / `--output=.f`, and getopt abbreviations (`--out`,
+        # `--output-doc`) that the tool accepts but exact matching missed.
+        split = _split_long(tok)
+        matched_long = False
+        if split is not None:
+            canon, _ = _abbrev(split[0], long_options)
+            if canon is not None:
+                matched_long = True
+                if split[1] is not None:
+                    val = split[1]
+                elif j + 1 < len(tokens):
+                    val, next_j = tokens[j + 1], j + 2
+        if not matched_long:
             present, fused = _cluster_value(tok, letter, value_shorts)
             if present:
                 if fused is not None:
                     val = fused
                 elif j + 1 < len(tokens):
-                    val, consumed_next = tokens[j + 1], True
+                    val, next_j = tokens[j + 1], j + 2
         if val is not None:
             resolved = _resolve_path(val, cwd=cwd)
             if resolved is None:
                 return [], f"{label} target {val!r} cannot be statically resolved"
             targets.append(resolved)
-        j += 2 if consumed_next else 1
+        j = next_j
     return targets, None
 
 
 def _h_wget(tokens: list[str], *, cwd: str | None):
     return _output_target(
-        tokens, letter="O", long="--output-document",
+        tokens, letter="O", long_name="output-document",
         value_shorts=_WGET_VALUE_SHORTS, label="wget -O", cwd=cwd,
     )
 
 
 def _h_curl(tokens: list[str], *, cwd: str | None):
     return _output_target(
-        tokens, letter="o", long="--output",
+        tokens, letter="o", long_name="output",
         value_shorts=_CURL_VALUE_SHORTS, label="curl -o", cwd=cwd,
     )
 
@@ -694,11 +812,14 @@ def _h_tar(tokens: list[str], *, cwd: str | None):
             break
         if tok.startswith("--"):
             name, _, value = tok.partition("=")
-            if name in ("--extract", "--get"):
+            # Prefix-resolve so getopt abbreviations (`--cre`, `--ext`)
+            # behave like the full spelling.
+            canon, _ = _abbrev(name[2:], _TAR_LONG_OPTIONS)
+            if canon in ("extract", "get"):
                 extract = True
-            elif name in ("--create", "--append", "--update", "--concatenate"):
+            elif canon in ("create", "append", "update", "concatenate"):
                 write_mode = True
-            elif name == "--file":
+            elif canon == "file":
                 if value:
                     archive = value
                 elif index + 1 < len(args):
