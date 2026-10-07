@@ -78,12 +78,25 @@ class ContextManager:
         # The runtime threads one owner in; standalone construction (tests,
         # embedding) still routes the commit through a private owner.
         self._transcript = transcript or Transcript(config)
+        # Message ids already committed to the canonical store. Ids are
+        # immutable and archival is ``INSERT OR IGNORE``, so a committed id
+        # never needs re-serializing. This turns the per-iteration
+        # re-archival of the whole transcript (O(n²) over a session) into an
+        # incremental delta. Cleared only when the cache is invalidated (we
+        # never drop it: an id, once written, stays written in the store).
+        self._archived_ids: set[str] = set()
 
     async def _wait(self, awaitable):
         return await asyncio.wait_for(awaitable, self.options.storage_timeout_seconds)
 
     async def archive(self, state: AgentState):
-        await self._wait(self.options.store.archive(self.config.session_id, model_messages(state)))
+        fresh = [m for m in model_messages(state) if m.id not in self._archived_ids]
+        if fresh:
+            await self._wait(self.options.store.archive(self.config.session_id, fresh))
+            # Mark committed only after the write succeeds, so a timed-out or
+            # failed archival is retried on the next call instead of being
+            # silently skipped.
+            self._archived_ids.update(m.id for m in fresh)
         if state.task:
             await self._wait(self.options.store.save_task(self.config.session_id, state.task))
 

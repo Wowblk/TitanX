@@ -723,3 +723,45 @@ async def test_offload_preserves_wrapper_and_only_archives_inspected_output(stor
 def test_invalid_budget_and_timeout_configuration(kwargs):
     with pytest.raises(ValueError):
         CompactionOptions(token_budget=1000, **kwargs)
+
+
+class _RecordingArchiveStore(ContextStore):
+    """Captures the message ids handed to each ``archive`` call (§5.3)."""
+
+    def __init__(self):
+        self.archive_batches: list[list[str]] = []
+        self.saved_tasks = 0
+
+    async def archive(self, session_id, messages):
+        self.archive_batches.append([m.id for m in messages])
+
+    async def save_task(self, session_id, task):
+        self.saved_tasks += 1
+
+
+async def test_archive_only_serializes_new_messages():
+    """§5.3: re-archiving an unchanged transcript must be a no-op.
+
+    ``prepare`` runs every iteration and ``_finish_loop`` runs again at the end,
+    each re-serializing and re-inserting the *entire* transcript (O(n²) across a
+    session). Message ids are immutable — an archived id never changes — so the
+    manager must submit only the messages it has not already committed.
+    """
+    store = _RecordingArchiveStore()
+    manager = ContextManager(ContextOptions(store), create_config())
+    first = UserMessage(role="user", content="first")
+    state = AgentState(messages=[first])
+
+    await manager.archive(state)
+    await manager.archive(state)
+
+    # The second archive of an unchanged transcript touches the store not at
+    # all — no re-serialization, no lock acquisition.
+    assert store.archive_batches == [[first.id]]
+
+    second = UserMessage(role="user", content="second")
+    state.messages.append(second)
+    await manager.archive(state)
+
+    # Only the delta is re-serialized; the already-archived message is skipped.
+    assert store.archive_batches == [[first.id], [second.id]]

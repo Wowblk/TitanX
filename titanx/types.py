@@ -126,8 +126,12 @@ class AgentConfig:
     channel: str
     system_prompt: str
     available_tools: tuple[ToolDefinition, ...]
-    max_iterations: int
-    auto_approve_tools: bool
+    # ``max_iterations`` and ``auto_approve_tools`` deliberately do NOT live
+    # here: both are governed by the ``PolicyStore`` (see ``AgentPolicy``).
+    # A second copy on the static config was never read and could only
+    # contradict the live policy, so it was removed. The ``AgentRuntime``
+    # constructor still accepts them — but only to seed a *new* policy when
+    # the host does not inject one.
     # When true, tool outputs are wrapped in ``<tool_output …>…</tool_output>``
     # markers in ``ToolMessage.content`` so the LLM has a structural cue
     # that the body is data, not instructions. Recommended for production

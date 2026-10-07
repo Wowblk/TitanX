@@ -274,17 +274,23 @@ def input_schema_fingerprint(schema: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def tool_contract_fingerprint(
+def _contract_payload(
     *,
     name: str,
     title: str | None,
     description: str,
     input_schema: Mapping[str, Any],
     output_schema: Mapping[str, Any] | None,
-) -> str:
-    """Fingerprint every MCP contract field TitanX may expose or enforce."""
+) -> dict[str, Any]:
+    """Build the exact, normalized MCP contract object used for pinning.
 
-    contract = {
+    This is the single source of truth for what an MCP contract *is*: both the
+    public :func:`tool_contract_fingerprint` and the discovery path's pin check
+    hash this same payload. Keeping one builder means an externally computed
+    pin can never drift from what enforcement recomputes.
+    """
+
+    return {
         "description": description,
         "inputSchema": normalize_input_schema(input_schema),
         "name": name,
@@ -295,6 +301,25 @@ def tool_contract_fingerprint(
         ),
         "title": title,
     }
+
+
+def tool_contract_fingerprint(
+    *,
+    name: str,
+    title: str | None,
+    description: str,
+    input_schema: Mapping[str, Any],
+    output_schema: Mapping[str, Any] | None,
+) -> str:
+    """Fingerprint every MCP contract field TitanX may expose or enforce."""
+
+    contract = _contract_payload(
+        name=name,
+        title=title,
+        description=description,
+        input_schema=input_schema,
+        output_schema=output_schema,
+    )
     return hashlib.sha256(_canonical_json(contract).encode("utf-8")).hexdigest()
 
 
@@ -674,13 +699,13 @@ class McpAdmissionRuntime(ToolRuntime):
                     if raw_output_schema is not None
                     else None
                 )
-                normalized_contract = {
-                    "description": description,
-                    "inputSchema": normalized_schema,
-                    "name": remote_name,
-                    "outputSchema": normalized_output_schema,
-                    "title": title,
-                }
+                normalized_contract = _contract_payload(
+                    name=remote_name,
+                    title=title,
+                    description=description,
+                    input_schema=normalized_schema,
+                    output_schema=normalized_output_schema,
+                )
                 encoded_contract = _canonical_json(normalized_contract).encode(
                     "utf-8"
                 )

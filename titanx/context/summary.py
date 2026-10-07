@@ -84,7 +84,7 @@ class LlmCompactionStrategy(CompactionStrategy):
         self.max_output_tokens = max_output_tokens
 
     async def summarize_context(self, messages, *, task=None, target_tokens=None):
-        config = replace(create_config(system_prompt=SUMMARY_INSTRUCTIONS, max_iterations=1),
+        config = replace(create_config(system_prompt=SUMMARY_INSTRUCTIONS),
                          max_output_tokens=self.max_output_tokens)
         payload = {"task": asdict(task) if task else None, "target_tokens": target_tokens,
                    "messages": [asdict(m) for m in messages]}
