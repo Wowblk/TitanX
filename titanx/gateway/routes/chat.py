@@ -89,6 +89,30 @@ async def _apply_approval_resolution(entry: SessionEntry) -> None:
     await entry.runtime.resume()
 
 
+def _scoped_session_id(options: GatewayOptions, body: dict[str, Any], session_id: str) -> str:
+    """Namespace ``session_id`` by the host-derived caller identity.
+
+    The gateway keys sessions on a client-supplied string, so a second caller
+    presenting another's ``sessionId`` would otherwise reach that session's
+    runtime — including the credentials its ``request_context`` bound at
+    creation. ``GatewayOptions.session_owner`` closes that: its identity is
+    folded into the key, so two callers can never collide. ``None`` (no
+    extractor, or a body carrying no identity) leaves the id untouched, which
+    is the historical behaviour. The owner is host-derived and prepended, so a
+    crafted ``session_id`` cannot forge a *different* owner's scoped key. The
+    unscoped fallback is only safe when the extractor never returns a falsy
+    owner for an attacker-reachable request — the host must guarantee that
+    (KnowFlow's Java layer always sets ``userId`` from the JWT).
+    """
+    extract = options.session_owner
+    if extract is None:
+        return session_id
+    owner = extract(body)
+    if not owner:
+        return session_id
+    return f"{owner}\x00{session_id}"
+
+
 def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter:
     router = APIRouter()
 
@@ -100,6 +124,7 @@ def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter
         message: str = body.get("message", "")
         if not session_id or not message:
             return JSONResponse({"error": "sessionId and message are required"}, status_code=400)
+        scoped_id = _scoped_session_id(options, body, session_id)
 
         queue: asyncio.Queue[dict | None] = asyncio.Queue()
 
@@ -115,7 +140,7 @@ def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter
         hooks = RuntimeHooks(on_event=on_event)
         try:
             entry = await sessions.get_or_create(
-                session_id,
+                scoped_id,
                 options.create_runtime,
                 hooks,
                 # The decoded request body is the only place a host can get
@@ -181,7 +206,7 @@ def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter
         session_id = body.get("sessionId", "")
         if not isinstance(session_id, str) or not session_id:
             return JSONResponse({"error": "sessionId is required"}, status_code=400)
-        entry = sessions.get(session_id)
+        entry = sessions.get(_scoped_session_id(options, body, session_id))
         if not entry:
             return JSONResponse({"error": "session not found"}, status_code=404)
         tool_call_id, _, error = _approval_fields(body, decision="approve")
@@ -202,7 +227,7 @@ def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter
         session_id = body.get("sessionId", "")
         if not isinstance(session_id, str) or not session_id:
             return JSONResponse({"error": "sessionId is required"}, status_code=400)
-        entry = sessions.get(session_id)
+        entry = sessions.get(_scoped_session_id(options, body, session_id))
         if not entry:
             return JSONResponse({"error": "session not found"}, status_code=404)
         tool_call_id, reason, error = _approval_fields(body, decision="reject")
@@ -232,7 +257,12 @@ def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
                 return
         await websocket.accept()
-        entry: SessionEntry | None = sessions.get(session_id)
+        # No eager lookup here: the pre-frame body is unavailable, so any
+        # ``get`` would have to use the *raw* path param — an unscoped lookup
+        # that a forged ``sessionId`` (e.g. ``u1%00X`` decoding into a victim's
+        # scoped key) could satisfy. The approve/reject branch below resolves
+        # the entry per-frame instead, where the caller's identity is known.
+        entry: SessionEntry | None = None
         active_exchange: asyncio.Task[None] | None = None
 
         try:
@@ -275,7 +305,7 @@ def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter
                     hooks = RuntimeHooks(on_event=on_event)
                     try:
                         entry_for_run = await sessions.get_or_create(
-                            session_id,
+                            _scoped_session_id(options, data, session_id),
                             options.create_runtime,
                             hooks,
                             # The first frame that creates the session is the
@@ -303,7 +333,9 @@ def chat_router(sessions: SessionRegistry, options: GatewayOptions) -> APIRouter
 
                 elif msg_type in ("approve", "reject"):
                     if entry is None:
-                        entry = sessions.get(session_id)
+                        entry = sessions.get(
+                            _scoped_session_id(options, data, session_id)
+                        )
                     if entry is None:
                         await websocket.send_json({
                             "type": "error",

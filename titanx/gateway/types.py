@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal
 
 from ..runtime import AgentRuntime
 from ..types import RuntimeHooks
@@ -43,6 +43,23 @@ class GatewayOptions:
       the historical ``(session_id, hooks)`` signature. Note the body is
       consulted only when the session is *created*; a later request
       reusing the same ``session_id`` reaches the existing runtime.
+
+    - ``session_owner`` — when set, a host-supplied extractor maps the
+      decoded request body to a stable caller identity (an authenticated
+      user id, a tenant). The gateway then scopes every session lookup by
+      that identity, so two callers presenting the same ``session_id``
+      get *separate* sessions instead of sharing one runtime — and with
+      it the runtime's bound credentials (the ``request_context`` a host
+      captured at creation). Return ``None`` when the body carries no
+      identity; that request falls back to the unscoped ``session_id``.
+      The default ``None`` preserves the historical single-namespace
+      behaviour. **Only useful when the returned identity is trustworthy**
+      (derived server-side, e.g. from a validated token) — a client-
+      controlled value would let a caller forge another's namespace. The
+      extractor is applied to every body that addresses a session, so the
+      identity field must be present on ``/approve`` and ``/reject`` requests
+      and on WS frames too, or those lookups fall back to the unscoped id and
+      miss the session.
     """
 
     port: int = 3000
@@ -59,6 +76,11 @@ class GatewayOptions:
     allowed_headers: list[str] = field(default_factory=lambda: ["x-api-key", "content-type"])
     max_sessions: int = 1000
     session_idle_ttl_seconds: float = 3600.0
+    # Maps a decoded request body to a stable caller identity, or ``None``
+    # when the body carries none. See the class docstring: sessions are
+    # scoped by this so a client-supplied ``sessionId`` cannot reach another
+    # caller's runtime. ``None`` keeps the historical single namespace.
+    session_owner: Callable[[dict[str, Any]], str | None] | None = None
 
 
 @dataclass

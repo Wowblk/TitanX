@@ -52,6 +52,12 @@ the SDK is a separate distribution.
   receives the `POST /api/chat` body (or the first WS frame), from which the
   bearer token and user id are read. The body is consulted only when the session
   is created.
+- **Sessions are scoped by `session_owner`.** Because the body is read only at
+  creation, a client-supplied `sessionId` reused by a second caller would
+  otherwise reach the first caller's runtime and its bound token. `run_gateway.py`
+  passes `GatewayOptions.session_owner`, which namespaces every session by the
+  Java-set `userId` (derived from the JWT, not the client), so two users can
+  never share a session even under a colliding id.
 - **`run_gateway.py` supports two LLMs**: `KimiLlm` when `KIMI_API_KEY` is set,
   otherwise the offline `EchoLlm` (which never calls a tool).
 
