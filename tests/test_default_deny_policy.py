@@ -72,6 +72,19 @@ def test_mandatory_approval_ignores_auto_approve() -> None:
     assert store.check_tool_call(_call("mcp__srv__tool"), definition).decision == "needs_approval"
 
 
+def test_mandatory_approval_forces_prompt_without_requires_approval() -> None:
+    # ``mandatory_approval`` is an independent field (see titanx/types.py): a
+    # tool that mandates review must pause even if the host forgot to also set
+    # ``requires_approval``. Otherwise a "mandatory review" tool that is merely
+    # allowlisted (with auto_approve_tools on) is dispatched with no prompt —
+    # the exact silent-approval failure the flag exists to prevent.
+    store = PolicyStore(
+        AgentPolicy(auto_approve_tools=True, tool_allowlist=["review_gate"])
+    )
+    definition = _definition("review_gate", requires_approval=False, mandatory=True)
+    assert store.check_tool_call(_call("review_gate"), definition).decision == "needs_approval"
+
+
 @pytest.mark.parametrize("bad", [[123], [""], "not-a-list", [None]])
 def test_tool_allowlist_validation_rejects_bad_entries(bad) -> None:
     with pytest.raises(PolicyValidationError):
