@@ -39,7 +39,6 @@ from .types import (
     RuntimeHooks,
     SafetyLayerLike,
     ToolCall,
-    ToolMessage,
     ToolResultEvent,
     ToolRuntime,
     TaskState,
@@ -411,7 +410,7 @@ class AgentRuntime:
             tool_call = self.state.pending_tool_calls[i]
             append_message(
                 self.state,
-                self._build_tool_message(
+                self._tool_pipeline.build_tool_message(
                     tool_call,
                     f"Tool call rejected by host: {reason}",
                     True,
@@ -736,11 +735,6 @@ class AgentRuntime:
         budget = self._compaction_options.input_budget if self._compaction_options else 0
         await self._emit(CompactionBlockedEvent(reason, None, budget))
         await self._emit(LoopEndEvent(reason=reason))
-
-    def _build_tool_message(self, tool_call: ToolCall, content: str, is_error: bool) -> ToolMessage:
-        # Retained for hosts/tests that call it directly; the pipeline owns
-        # tool-message construction.
-        return self._tool_pipeline.build_tool_message(tool_call, content, is_error)
 
     async def _emit(self, event: RuntimeEvent) -> None:
         hooks = self._scoped_runtime_hooks.get() or self._hooks
