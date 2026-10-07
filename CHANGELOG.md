@@ -179,6 +179,15 @@ always be flagged in the **Changed** / **Removed** sections.
   `AgentRuntime.wait_for_approval` (and its `_approval_event`), and the
   unreachable `require_api_key` (`docs/design-review-2026-10-07.md` problem #15).
 
+### Tests
+
+- `tests/test_tool_pipeline_coverage.py` closes mutation-testing survivors left
+  on the §3.1 tool-pipeline extraction: it asserts PII redaction is gated by
+  `ToolDefinition.requires_sanitization`, that a tool called exactly once per
+  successful batch (the at-most-once cursor), the identity fields of the
+  `tool_invocation` audit record, and that `titanx.state.now_iso` stamps UTC.
+  These turn 18 previously surviving mutants into killed ones.
+
 ## [0.4.0] - 2026-10-07
 
 ### Added
