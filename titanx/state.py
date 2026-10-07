@@ -21,8 +21,6 @@ def create_config(
     channel: str = "repl",
     system_prompt: str = "",
     available_tools: list[ToolDefinition] | None = None,
-    max_iterations: int = 10,
-    auto_approve_tools: bool = False,
     wrap_tool_output: bool = False,
     max_output_tokens: int | None = None,
 ) -> AgentConfig:
@@ -35,8 +33,6 @@ def create_config(
         channel=channel,
         system_prompt=system_prompt,
         available_tools=tuple(available_tools or []),
-        max_iterations=max_iterations,
-        auto_approve_tools=auto_approve_tools,
         wrap_tool_output=wrap_tool_output,
         max_output_tokens=max_output_tokens,
     )

@@ -83,8 +83,6 @@ class AgentRuntime:
             channel=channel,
             system_prompt=system_prompt,
             available_tools=available_tools,
-            max_iterations=max_iterations,
-            auto_approve_tools=auto_approve_tools,
             wrap_tool_output=wrap_tool_output,
             max_output_tokens=max_output_tokens,
         )

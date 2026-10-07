@@ -23,7 +23,10 @@ from titanx.factory import (
     CreateSandboxedRuntimeOptions,
     create_sandboxed_runtime,
 )
+from titanx.policy import AgentPolicy, PolicyStore
+from titanx.runtime import AgentRuntime
 from titanx.safety.safety_layer import SafetyLayer
+from titanx.state import create_config
 from titanx.types import (
     LoopStartEvent,
     LlmTurnResult,
@@ -35,7 +38,7 @@ from titanx.types import (
     ToolRuntime,
 )
 
-from ._helpers import ScriptedLlm, SingleTool, make_runtime
+from ._helpers import NullTools, ScriptedLlm, SingleTool, make_runtime
 
 
 class TestQ13IterationReset:
@@ -286,3 +289,52 @@ class TestWrappedToolOutputConfig:
             "</tool_output>"
         )
         assert message.content.count("</tool_output>") == 1
+
+
+class TestConfigPolicyOwnership:
+    """§2.3: the loop budget and the auto-approve flag are policy-owned.
+
+    ``AgentConfig`` used to carry a second copy of ``max_iterations`` /
+    ``auto_approve_tools`` seeded from the constructor. Nothing ever read it —
+    the loop and the approval gate read the ``PolicyStore`` — so the config
+    copy could only ever *contradict* the live policy (a host injecting a
+    policy with ``max_iterations=3`` still saw ``config.max_iterations==10``).
+    The static config must not present a competing source of truth.
+    """
+
+    def test_config_does_not_carry_policy_owned_knobs(self) -> None:
+        config = create_config()
+        assert not hasattr(config, "max_iterations")
+        assert not hasattr(config, "auto_approve_tools")
+
+    def test_injected_policy_does_not_leak_into_config(self) -> None:
+        store = PolicyStore(AgentPolicy(max_iterations=3, auto_approve_tools=True))
+        runtime = AgentRuntime(
+            ScriptedLlm([]),
+            NullTools(),
+            SafetyLayer(),
+            max_iterations=99,
+            auto_approve_tools=False,
+            policy_store=store,
+        )
+
+        # The injected policy is authoritative for the loop budget...
+        assert runtime._effective_max_iterations == 3
+        # ...and the config carries no competing copy that a host could read
+        # and mistake for the governing value.
+        assert not hasattr(runtime.config, "max_iterations")
+        assert not hasattr(runtime.config, "auto_approve_tools")
+
+    def test_constructor_args_still_seed_a_fresh_policy(self) -> None:
+        # With no injected store the constructor args are the seed for the
+        # policy the runtime creates — their one honest role.
+        runtime = AgentRuntime(
+            ScriptedLlm([]),
+            NullTools(),
+            SafetyLayer(),
+            max_iterations=4,
+            auto_approve_tools=True,
+        )
+        assert runtime._effective_max_iterations == 4
+        assert runtime._policy_store.get_policy().auto_approve_tools is True
+

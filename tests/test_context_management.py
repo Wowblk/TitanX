@@ -723,3 +723,83 @@ async def test_offload_preserves_wrapper_and_only_archives_inspected_output(stor
 def test_invalid_budget_and_timeout_configuration(kwargs):
     with pytest.raises(ValueError):
         CompactionOptions(token_budget=1000, **kwargs)
+
+
+class _RecordingArchiveStore(ContextStore):
+    """Captures the message ids handed to each ``archive`` call (§5.3)."""
+
+    def __init__(self):
+        self.archive_batches: list[list[str]] = []
+        self.saved_tasks = 0
+
+    async def archive(self, session_id, messages):
+        self.archive_batches.append([m.id for m in messages])
+
+    async def save_task(self, session_id, task):
+        self.saved_tasks += 1
+
+
+async def test_archive_only_serializes_new_messages():
+    """§5.3: re-archiving an unchanged transcript must be a no-op.
+
+    ``prepare`` runs every iteration and ``_finish_loop`` runs again at the end,
+    each re-serializing and re-inserting the *entire* transcript (O(n²) across a
+    session). Message ids are immutable — an archived id never changes — so the
+    manager must submit only the messages it has not already committed.
+    """
+    store = _RecordingArchiveStore()
+    manager = ContextManager(ContextOptions(store), create_config())
+    first = UserMessage(role="user", content="first")
+    state = AgentState(messages=[first])
+
+    await manager.archive(state)
+    await manager.archive(state)
+
+    # The second archive of an unchanged transcript issues no further
+    # store.archive call — no re-serialization, no lock acquisition.
+    assert store.archive_batches == [[first.id]]
+
+    second = UserMessage(role="user", content="second")
+    state.messages.append(second)
+    await manager.archive(state)
+
+    # Only the delta is re-serialized; the already-archived message is skipped.
+    assert store.archive_batches == [[first.id], [second.id]]
+
+
+class _FlakyArchiveStore(_RecordingArchiveStore):
+    """Fails the next ``archive`` call, then succeeds."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail_next = False
+
+    async def archive(self, session_id, messages):
+        if self.fail_next:
+            self.fail_next = False
+            raise OSError("disk full")
+        await super().archive(session_id, messages)
+
+
+async def test_archive_retries_ids_after_a_failed_write():
+    """§5.3: a failed/timed-out archival must not mark its ids as committed.
+
+    The watermark is updated only after ``store.archive`` returns, so an id
+    whose write failed is re-submitted on the next call rather than being
+    silently dropped from the canonical store.
+    """
+    store = _FlakyArchiveStore()
+    manager = ContextManager(ContextOptions(store), create_config())
+    message = UserMessage(role="user", content="only once")
+    state = AgentState(messages=[message])
+
+    store.fail_next = True
+    with pytest.raises(OSError):
+        await manager.archive(state)
+
+    # Nothing committed on the failure...
+    assert store.archive_batches == []
+
+    # ...so the retry re-submits the same id exactly once.
+    await manager.archive(state)
+    assert store.archive_batches == [[message.id]]

@@ -93,9 +93,29 @@ always be flagged in the **Changed** / **Removed** sections.
   `delete_session` and `close` were only on `SQLiteContextStore`; they are now on
   the base `ContextStore` too, since runtime teardown and gateway eviction call
   them through the interface (`docs/design-review-2026-10-07.md` §5.4).
+- **`AgentConfig` no longer duplicates policy-owned knobs (breaking)** —
+  `max_iterations` and `auto_approve_tools` were removed from `AgentConfig` and
+  `create_config()`. Both are governed by the `PolicyStore` (`AgentPolicy`) and
+  were never read from the config, so the second copy could only ever contradict
+  the live policy (a host injecting a policy with `max_iterations=3` still saw
+  `config.max_iterations == 10`). `AgentRuntime` still accepts them as
+  constructor arguments, but solely to seed a *new* policy when the host does not
+  inject a `policy_store` (`docs/design-review-2026-10-07.md` §2.3).
 
 ### Fixed
 
+- **One source of truth for the MCP contract fingerprint** — the discovery
+  path's pin check rebuilt the contract dict inline and hashed it separately from
+  the public `tool_contract_fingerprint`, so the two could drift and reject a
+  correctly-computed external pin. Both now share one `_contract_payload`
+  builder (`docs/design-review-2026-10-07.md` §1.6).
+- **Transcript archiving is incremental, not O(n²)** — `ContextManager.archive`
+  re-serialized and re-inserted the *entire* transcript on every `prepare` and
+  `_finish_loop` call. It now tracks already-archived message ids (ids are
+  immutable) and submits only the delta; an unchanged transcript issues no
+  `store.archive` call (the task row is still upserted, and
+  `commit_compaction` still serializes its own originals+replacement once per
+  compaction) (`docs/design-review-2026-10-07.md` §5.3).
 - **MCP tool calls no longer serialize on the admission lock** —
   `McpAdmissionRuntime.execute` held `self._lock` across `client.call_tool`, so a
   slow (or hung-until-timeout) server stalled every other MCP tool on the same
