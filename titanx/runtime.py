@@ -54,6 +54,7 @@ class AgentRuntime:
         max_iterations: int = 10,
         auto_approve_tools: bool = False,
         wrap_tool_output: bool = False,
+        max_output_tokens: int | None = None,
         hooks: RuntimeHooks | None = None,
         policy_store=None,
         compaction_strategy=None,
@@ -78,12 +79,11 @@ class AgentRuntime:
             max_iterations=max_iterations,
             auto_approve_tools=auto_approve_tools,
             wrap_tool_output=wrap_tool_output,
+            max_output_tokens=max_output_tokens,
         )
         self.state: AgentState = create_initial_state()
         if context_options is not None and context_options.session_id is not None:
             self.config = replace(self.config, session_id=context_options.session_id)
-        if compaction_options is not None and compaction_options.reserved_output_tokens:
-            self.config = replace(self.config, max_output_tokens=compaction_options.reserved_output_tokens)
 
         self._llm = llm
         self._tools = tools

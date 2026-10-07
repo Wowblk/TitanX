@@ -501,7 +501,7 @@ async def test_compression_target_is_lower_than_trigger():
     assert result.failure_reason == "summary_target_not_reached"
 
 
-async def test_runtime_prefers_adapter_counter_and_passes_output_reserve():
+async def test_runtime_prefers_adapter_counter_and_keeps_output_reserve_in_budget():
     class CountingLlm(RecordingLlm):
         def __init__(self):
             super().__init__([LlmTurnResult(type="text", text="done")])
@@ -515,9 +515,42 @@ async def test_runtime_prefers_adapter_counter_and_passes_output_reserve():
     runtime.set_task("current task")
     await runtime.run_prompt("new user input")
     assert options.input_budget == 70
-    assert llm.counted[0][0].max_output_tokens == 20
+    # reserved_output_tokens is a compaction input-budget reservation only; it
+    # must never be smuggled into the provider generation cap on AgentConfig.
+    assert llm.counted[0][0].max_output_tokens is None
     assert llm.counted[0][1] == llm.inputs[0]
     assert any("current task" in m.content for m in llm.counted[0][1])
+
+
+async def test_runtime_forwards_host_max_output_tokens_to_adapter():
+    class CountingLlm(RecordingLlm):
+        def __init__(self):
+            super().__init__([LlmTurnResult(type="text", text="done")])
+            self.counted = []
+        def count_input_tokens(self, config, messages):
+            self.counted.append((config, deepcopy(messages)))
+            return 10
+    llm = CountingLlm()
+    options = CompactionOptions(1000, model_context_window=100, reserved_output_tokens=20, safety_margin_tokens=10)
+    runtime = AgentRuntime(
+        llm, NullTools(), SafetyLayer(),
+        compaction_strategy=RecordingStrategy(), compaction_options=options,
+        max_output_tokens=42,
+    )
+    runtime.set_task("current task")
+    await runtime.run_prompt("new user input")
+    assert options.input_budget == 70
+    assert llm.counted[0][0].max_output_tokens == 42
+
+
+def test_create_config_rejects_invalid_max_output_tokens():
+    assert create_config().max_output_tokens is None
+    assert create_config(max_output_tokens=0).max_output_tokens == 0
+    assert create_config(max_output_tokens=128).max_output_tokens == 128
+    with pytest.raises(ValueError):
+        create_config(max_output_tokens=-1)
+    with pytest.raises(ValueError):
+        create_config(max_output_tokens=True)
 
 
 async def test_context_tool_cannot_select_session_or_request_unbounded_page(store):
