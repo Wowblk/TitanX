@@ -9,7 +9,9 @@ import pytest
 
 from titanx import (
     AgentPolicy,
+    AgentRuntime,
     AuditLog,
+    McpAdmissionError,
     McpAdmissionPolicy,
     McpAdmissionRuntime,
     McpContractPinMismatchError,
@@ -17,10 +19,13 @@ from titanx import (
     McpProtocolError,
     McpTransportError,
     PolicyStore,
+    SafetyLayer,
     input_schema_fingerprint,
     tool_contract_fingerprint,
 )
 from titanx.types import ToolCall
+
+from ._helpers import ScriptedLlm
 
 
 OBJECT_SCHEMA = {"type": "object", "properties": {}}
@@ -828,3 +833,44 @@ async def test_broken_audit_backend_does_not_break_admission():
     assert definition.name == "mcp__github__search"
     assert result.error is None
     assert client.call_calls == [("search", {})]
+
+
+def test_list_tools_before_discover_raises_with_guidance():
+    client = FakeClient([[FakeTool("search", OBJECT_SCHEMA)]])
+    runtime = McpAdmissionRuntime({"github": client}, allow("github", "search"))
+
+    assert runtime.is_discovered is False
+    with pytest.raises(McpAdmissionError, match="discover"):
+        runtime.list_tools()
+
+    # Fail-loud must not smuggle in hidden synchronous network I/O.
+    assert client.list_calls == 0
+
+
+def test_constructing_agent_runtime_before_discover_fails_loudly():
+    client = FakeClient([[FakeTool("search", OBJECT_SCHEMA)]])
+    mcp = McpAdmissionRuntime({"github": client}, allow("github", "search"))
+
+    # AgentRuntime snapshots tool definitions at construction; an
+    # undiscovered MCP runtime must surface the mistake here rather than
+    # silently reporting every MCP tool as ``unknown_tool`` forever.
+    with pytest.raises(McpAdmissionError, match="discover"):
+        AgentRuntime(ScriptedLlm([]), mcp, SafetyLayer())
+
+    assert client.list_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_list_tools_after_discover_returns_admitted_tools():
+    client = FakeClient([[FakeTool("search", OBJECT_SCHEMA)]])
+    runtime = McpAdmissionRuntime({"github": client}, allow("github", "search"))
+
+    discovered = await runtime.discover()
+
+    assert runtime.is_discovered is True
+    assert [definition.name for definition in runtime.list_tools()] == [
+        "mcp__github__search"
+    ]
+    assert [definition.name for definition in discovered] == [
+        "mcp__github__search"
+    ]

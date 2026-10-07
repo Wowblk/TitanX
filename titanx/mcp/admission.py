@@ -425,12 +425,22 @@ class McpAdmissionRuntime(ToolRuntime):
     def list_tools(self) -> list[ToolDefinition]:
         """Return admitted definitions cached by :meth:`discover`.
 
-        An empty list before discovery is intentional: a synchronous caller
-        must never cause hidden network I/O, and default-deny remains intact.
+        Raises:
+            McpAdmissionError: if :meth:`discover` has not completed. An empty
+                list would be indistinguishable from "the allowlist admitted no
+                tools", so an undiscovered runtime fails loudly instead of
+                silently exposing zero MCP tools. A synchronous caller still
+                never triggers hidden network I/O — it must ``await
+                discover()`` first.
         """
 
         if self._snapshot is None:
-            return []
+            raise McpAdmissionError(
+                "McpAdmissionRuntime.list_tools() was called before discover(); "
+                "await McpAdmissionRuntime.discover() once before handing this "
+                "runtime to an AgentRuntime, otherwise MCP tools would be "
+                "silently reported as unknown_tool."
+            )
         return self._clone_definitions(self._snapshot.definitions)
 
     async def execute(
