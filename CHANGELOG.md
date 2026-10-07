@@ -23,8 +23,9 @@ always be flagged in the **Changed** / **Removed** sections.
   raises) flushes/archives the transcript and tears down the tool layer;
   `SandboxedToolRuntime.aclose()` forwards to the session manager. The gateway
   runs teardown on idle/LRU eviction and on shutdown, and per-session context
-  rows are deleted so sessions no longer leak
-  (`docs/design-review-2026-10-07.md` problem #6).
+  rows are deleted so sessions no longer leak. Eviction tears down swept victims
+  even if session creation subsequently fails, so a detached session cannot leak
+  its sandbox/storage resources (`docs/design-review-2026-10-07.md` problem #6).
 
 ### Changed
 
@@ -34,8 +35,12 @@ always be flagged in the **Changed** / **Removed** sections.
   `PolicyStore.check_tool_call` precedence is denylist → unregistered → approval
   gate → allowlist → deny, with `auto_approve_tools` as an explicit global
   opt-in. **Breaking:** hosts that relied on the previous implicit allow must add
-  their tools to the allowlist (helper: `PolicyStore.allow_tools()`), matching
-  TXS-02 (`docs/design-review-2026-10-07.md` problem #4).
+  their tools to the allowlist (helper: `PolicyStore.allow_tools()`), or, when
+  using `create_sandboxed_runtime`, via the new
+  `CreateSandboxedRuntimeOptions.tool_allowlist` field — so a factory-built
+  runtime can authorise its own non-approval handlers without hand-building a
+  `PolicyStore`. Matches TXS-02
+  (`docs/design-review-2026-10-07.md` problem #4).
 - **MCP authorization unified under `PolicyStore`** — `McpAdmissionRuntime`
   accepts an optional `policy_store`, projects admitted `mcp__{server}__{tool}`
   names into the single allowlist plane, and writes discovery/admit/deny/drift

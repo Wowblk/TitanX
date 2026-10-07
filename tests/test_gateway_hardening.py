@@ -174,3 +174,19 @@ class TestSessionRegistryTeardown:
         await registry.aclose()
         assert len(registry) == 0
         assert all(entry.runtime.closed for entry in entries)
+
+    async def test_create_failure_still_tears_down_swept_idle_victims(self) -> None:
+        # A request first sweeps an idle-expired victim out of the map (it is
+        # now unreachable), then creation fails. The detached victim must still
+        # be torn down or its sandbox session and store rows leak.
+        registry = SessionRegistry(max_sessions=10, idle_ttl_seconds=0.01)
+        idle = await registry.get_or_create("idle", _create_runtime, RuntimeHooks())  # type: ignore[arg-type]
+        idle.last_used = 0.0
+
+        async def failing_create(sid: str, hooks: RuntimeHooks) -> _FakeRuntime:
+            raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await registry.get_or_create("new", failing_create, RuntimeHooks())  # type: ignore[arg-type]
+
+        assert idle.runtime.closed is True

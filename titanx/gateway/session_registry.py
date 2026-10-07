@@ -83,36 +83,45 @@ class SessionRegistry:
             return existing
 
         victims: list[SessionEntry] = []
-        async with self._lock:
-            # Double-check under the lock — a concurrent caller for the
-            # same id may have just created it.
-            existing = self._sessions.get(session_id)
-            if existing is not None and not self._is_idle_expired(existing):
-                existing.touch()
-                return existing
+        try:
+            async with self._lock:
+                # Double-check under the lock — a concurrent caller for the
+                # same id may have just created it.
+                existing = self._sessions.get(session_id)
+                if existing is not None and not self._is_idle_expired(existing):
+                    existing.touch()
+                    return existing
 
-            # Sweep idle entries before applying the cap so we don't
-            # evict an active session just because we're full of stale
-            # ones we already could've reaped.
-            victims.extend(self._sweep_idle_locked())
-            if len(self._sessions) >= self._max:
-                victim = self._evict_lru_locked()
-                if victim is None:
-                    raise SessionCapacityError(
-                        "session capacity reached and all sessions are active"
-                    )
-                victims.append(victim)
+                # Sweep idle entries before applying the cap so we don't
+                # evict an active session just because we're full of stale
+                # ones we already could've reaped.
+                victims.extend(self._sweep_idle_locked())
+                if len(self._sessions) >= self._max:
+                    victim = self._evict_lru_locked()
+                    if victim is None:
+                        raise SessionCapacityError(
+                            "session capacity reached and all sessions are active"
+                        )
+                    victims.append(victim)
 
-            runtime_or_coro = create(session_id, hooks)
-            if inspect.isawaitable(runtime_or_coro):
-                runtime = await runtime_or_coro
-            else:
-                runtime = runtime_or_coro
-            entry = SessionEntry(
-                runtime=runtime,
-                approve_event=asyncio.Event(),
-            )
-            self._sessions[session_id] = entry
+                runtime_or_coro = create(session_id, hooks)
+                if inspect.isawaitable(runtime_or_coro):
+                    runtime = await runtime_or_coro
+                else:
+                    runtime = runtime_or_coro
+                entry = SessionEntry(
+                    runtime=runtime,
+                    approve_event=asyncio.Event(),
+                )
+                self._sessions[session_id] = entry
+        except BaseException:
+            # Sweep/eviction may already have detached victims from the map
+            # before creation failed; tear them down here or their sandbox
+            # sessions and store rows leak. The ``async with`` released the
+            # lock on the way out, so this runs outside it like the happy path.
+            for victim in victims:
+                await self._teardown_entry(victim)
+            raise
         # Tear victims down *after* releasing the registry lock: teardown is
         # arbitrary host code (sandbox destroy, store deletes) and must never
         # run while the registry is serialised against creation.

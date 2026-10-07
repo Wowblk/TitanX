@@ -37,6 +37,10 @@ class CreateSandboxedRuntimeOptions:
     workspace_dir: str | None = None
     allowed_write_paths: list[str] | None = None
     policy_store: PolicyStore | None = None
+    # Non-approval handlers have no approval gate to fall back on, so under
+    # deny-by-default they must be named here (or pre-wired via ``policy_store``)
+    # before the runtime will dispatch them.
+    tool_allowlist: list[str] | None = None
     compaction_strategy: CompactionStrategy | None = None
     compaction_options: CompactionOptions | None = None
     context_options: ContextOptions | None = None
@@ -182,6 +186,8 @@ def _resolve_policy_store(options: CreateSandboxedRuntimeOptions) -> PolicyStore
     if options.context_options is not None:
         from .context.manager import CONTEXT_TOOL_NAMES
         tool_allowlist = sorted(CONTEXT_TOOL_NAMES)
+    if options.tool_allowlist:
+        tool_allowlist = sorted(set(tool_allowlist) | set(options.tool_allowlist))
     return PolicyStore(
         AgentPolicy(
             allowed_write_paths=list(options.allowed_write_paths or []),
