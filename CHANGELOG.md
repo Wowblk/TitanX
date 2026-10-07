@@ -39,6 +39,21 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Changed
 
+- **`AgentRuntime` split: the tool-call pipeline is now a collaborator** — the
+  302-line `_execute_tool_calls` method and its support helpers (authorization
+  denial, audit, `ToolMessage` construction, output validation, cancellation
+  closure) moved verbatim into a new `ToolCallPipeline`
+  (`titanx/tool_pipeline.py`); `runtime.py` drops from 1316 to 744 lines and
+  from ~24 function-local imports to zero. Behaviour is unchanged — the pipeline
+  reads the runtime's live `config` and safety layer through getters, so a host
+  that swaps the execution identity between calls is still observed correctly
+  (`docs/design-review-2026-10-07.md` §3.1).
+- **Context recovery state is explicit** — the two loose private flags
+  `_context_stop_reason` / `_context_completion_pending` (a hidden second state
+  machine layered on `AgentState.signal`) are replaced by one `ContextRecovery`
+  collaborator (`titanx/context/recovery.py`) with named transitions and a single
+  `mode` decision (`none` / `archive_only` / `full`). No public API change
+  (`docs/design-review-2026-10-07.md` §3.2).
 - **Deny-by-default tool authorization** — registered tools that do not require
   approval are now **denied** unless explicitly allowlisted via
   `AgentPolicy.tool_allowlist` (a validated, normalized list of tool names). The
