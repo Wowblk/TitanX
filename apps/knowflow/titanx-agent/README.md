@@ -5,7 +5,7 @@ TitanX runtime to KnowFlow: a Kimi (Moonshot) LLM adapter, a tool runtime that
 calls the KnowFlow HTTP API, and a gateway bootstrap.
 
 The TitanX SDK is **not** vendored here. It lives once, at the monorepo root
-(`../../../titanx`), and this package depends on it as a path dependency.
+(`../../../titanx`).
 
 ## Layout
 
@@ -18,14 +18,25 @@ The TitanX SDK is **not** vendored here. It lives once, at the monorepo root
 
 ## Setup
 
+The easiest path is the monorepo root venv, which already has the SDK installed
+editable (see the root `README.md`); from here you only need the agent package:
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-Installing from this directory pulls the SDK in from `../../../` as a path
-dependency.
+For a standalone venv, install the SDK from the repo root **first**:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ../../..      # the TitanX SDK
+pip install -e ".[dev]"      # this agent
+```
+
+The SDK is not listed in this package's `dependencies`: a relative
+`titanx @ file:../../..` reference is not installable by pip, so it is installed
+explicitly instead.
 
 ## Run
 

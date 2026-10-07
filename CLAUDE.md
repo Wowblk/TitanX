@@ -87,8 +87,9 @@ Use `create_sandboxed_runtime()` from `titanx/factory.py` to wire components tog
 
 `apps/knowflow/` is a separate product built on this SDK; it is in this repo so
 the SDK has a single source of truth (the agent previously carried a vendored
-copy). Its agent lives in `apps/knowflow/titanx-agent/` and depends on the SDK as
-a path dependency (`titanx @ file:../../..`). SDK changes belong in `titanx/`
+copy). Its agent lives in `apps/knowflow/titanx-agent/` and imports the SDK from
+`../../../titanx` (installed into the same venv, not declared as a dependency —
+pip cannot install a relative `file:` reference). SDK changes belong in `titanx/`
 here, never in a downstream copy. Run its suite from
 `apps/knowflow/titanx-agent/` (`python -m pytest -q`); the root `pytest` does not
 collect it. See `apps/knowflow/titanx-agent/CLAUDE.md` for details.

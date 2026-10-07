@@ -68,9 +68,9 @@ the unified application for compatibility. See the
 
 `apps/knowflow/` holds KnowFlow — a knowledge-community product (Java backend, Go
 gateway, React frontend) whose AI assistant is built on this SDK. Its Python
-agent lives in `apps/knowflow/titanx-agent/` and depends on the SDK as a path
-dependency; there is no vendored SDK copy. Changes that belong to the SDK are
-made in `titanx/` here, not downstream. See
+agent lives in `apps/knowflow/titanx-agent/` and imports the SDK from
+`titanx/` here; there is no vendored SDK copy. Changes that belong to the SDK are
+made in `titanx/`, not downstream. See
 [`apps/knowflow/titanx-agent/CLAUDE.md`](apps/knowflow/titanx-agent/CLAUDE.md)
 for the agent-specific notes.
 

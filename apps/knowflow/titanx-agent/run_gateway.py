@@ -71,8 +71,10 @@ def make_runtime(
         bearer_token=token,
     )
 
+    # No auto_approve_tools: the four tools do not require approval, so the flag
+    # would be inert today while silently auto-approving any future tool that
+    # grows a requires_approval flag. The allowlist is the real gate.
     policy = AgentPolicy(
-        auto_approve_tools=True,
         max_iterations=int(os.getenv("TITANX_MAX_ITERATIONS", "8")),
         tool_allowlist=list(KNOWFLOW_TOOLS),
     )

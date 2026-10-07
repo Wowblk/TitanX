@@ -4,8 +4,7 @@ KnowFlow 助手背后的 Python agent 服务。它把通用的 TitanX runtime �
 KnowFlow：一个 Kimi（Moonshot）LLM adapter、一个调用 KnowFlow HTTP API 的工具
 runtime，以及一个 gateway 启动脚本。
 
-TitanX SDK **不再**内嵌在这里。SDK 只存在于 monorepo 根目录（`../../../titanx`），
-本包以路径依赖的方式引用它。
+TitanX SDK **不再**内嵌在这里。SDK 只存在于 monorepo 根目录（`../../../titanx`）。
 
 ## 目录结构
 
@@ -18,13 +17,24 @@ TitanX SDK **不再**内嵌在这里。SDK 只存在于 monorepo 根目录（`..
 
 ## 安装
 
+最简单的方式是复用 monorepo 根目录的 venv（其中已 editable 安装 SDK，见根目录
+`README.md`），在本目录只需装 agent 本身：
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-在本目录安装时会以路径依赖的方式从 `../../../` 引入 SDK。
+若使用独立 venv，请**先**从仓库根目录安装 SDK：
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ../../..      # TitanX SDK
+pip install -e ".[dev]"      # 本 agent
+```
+
+SDK 未列在本包的 `dependencies` 中：相对的 `titanx @ file:../../..` 引用无法被 pip
+安装，因此改为显式安装。
 
 ## 运行
 

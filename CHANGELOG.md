@@ -134,12 +134,13 @@ always be flagged in the **Changed** / **Removed** sections.
   moved to `apps/knowflow/` with its full history, and the SDK copy it used to
   vendor under `apps/knowflow/titanx-agent/titanx/` is **removed**. The agent's
   KnowFlow-specific glue now lives in
-  `apps/knowflow/titanx-agent/knowflow_agent/` and declares
-  `titanx @ file:../../..`, so there is one SDK source tree. `run_gateway.py` was
-  rewritten for the 0.4.0 application layer (explicit `AgentPolicy` allowlisting
-  the four KnowFlow tools, `request_context` for per-session credentials), and the
-  `titanx-agent` image now builds from the repository root. The root `pytest` is
-  scoped to `tests/`; the agent suite runs from its own directory.
+  `apps/knowflow/titanx-agent/knowflow_agent/` and imports the SDK from the repo
+  root (installed into the same venv; not a declared dependency, since pip cannot
+  install a relative `file:` reference). `run_gateway.py` was rewritten for the
+  0.4.0 application layer (explicit `AgentPolicy` allowlisting the four KnowFlow
+  tools, `request_context` for per-session credentials), and the `titanx-agent`
+  image now builds from the repository root. The root `pytest` is scoped to
+  `tests/`; the agent suite runs from its own directory.
 
 ### Fixed
 

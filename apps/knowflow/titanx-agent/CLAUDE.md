@@ -3,18 +3,20 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 `titanx-agent` is the KnowFlow application layer on top of the TitanX SDK. The
-SDK is not vendored: it lives once at the monorepo root (`../../../titanx`) and
-this package depends on it as a path dependency. **When a change belongs to the
-SDK (runtime, types, gateway, policy), edit `../../../titanx/` — not this
-directory.**
+SDK is not vendored: it lives once at the monorepo root (`../../../titanx`).
+**When a change belongs to the SDK (runtime, types, gateway, policy), edit
+`../../../titanx/` — not this directory.**
 
 ## Commands
 
 ```bash
-# Setup (Python >= 3.11); pulls the monorepo SDK in as a path dependency
+# Setup (Python >= 3.11). The SDK is not a declared dependency (a relative
+# `titanx @ file:../../..` cannot be installed by pip) — install it first
+# unless you are reusing the monorepo root venv, which already has it.
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ../../..        # the TitanX SDK
+pip install -e ".[dev]"        # this agent
 
 # Start the FastAPI gateway on http://localhost:3000
 python run_gateway.py
