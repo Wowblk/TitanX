@@ -30,6 +30,10 @@ class AgentPolicy:
     max_iterations: int = 10
     # Tools listed here are unconditionally denied even when auto_approve_tools=True.
     tool_denylist: list[str] = field(default_factory=list)
+    # Deny-by-default (TXS-02): a registered tool that does not itself require
+    # approval is only dispatched when its name appears here. Registration is
+    # not authorisation. ``tool_denylist`` still wins over this list.
+    tool_allowlist: list[str] = field(default_factory=list)
     # Paths the sandbox may *read* but never write. Validated by the same
     # ``validate_write_path`` rules (no privileged subtrees, normalised,
     # absolute) — host /etc, /proc, /sys etc. stay forbidden because

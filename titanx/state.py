@@ -24,7 +24,10 @@ def create_config(
     max_iterations: int = 10,
     auto_approve_tools: bool = False,
     wrap_tool_output: bool = False,
+    max_output_tokens: int | None = None,
 ) -> AgentConfig:
+    if max_output_tokens is not None and (type(max_output_tokens) is not int or max_output_tokens < 0):
+        raise ValueError("max_output_tokens must be a nonnegative integer or None")
     return AgentConfig(
         thread_id=_new_id(),
         session_id=_new_id(),
@@ -35,6 +38,7 @@ def create_config(
         max_iterations=max_iterations,
         auto_approve_tools=auto_approve_tools,
         wrap_tool_output=wrap_tool_output,
+        max_output_tokens=max_output_tokens,
     )
 
 

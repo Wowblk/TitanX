@@ -55,6 +55,9 @@ class SessionRegistry:
         self._ttl = idle_ttl_seconds
         self._sessions: dict[str, SessionEntry] = {}
         self._lock = asyncio.Lock()
+        # Teardown tasks scheduled by the synchronous ``remove`` path. Held so
+        # the event loop cannot garbage-collect them mid-flight.
+        self._pending_teardowns: set[asyncio.Task] = set()
 
     def get(self, session_id: str) -> SessionEntry | None:
         entry = self._sessions.get(session_id)
@@ -79,38 +82,68 @@ class SessionRegistry:
         if existing is not None:
             return existing
 
-        async with self._lock:
-            # Double-check under the lock — a concurrent caller for the
-            # same id may have just created it.
-            existing = self._sessions.get(session_id)
-            if existing is not None and not self._is_idle_expired(existing):
-                existing.touch()
-                return existing
+        victims: list[SessionEntry] = []
+        try:
+            async with self._lock:
+                # Double-check under the lock — a concurrent caller for the
+                # same id may have just created it.
+                existing = self._sessions.get(session_id)
+                if existing is not None and not self._is_idle_expired(existing):
+                    existing.touch()
+                    return existing
 
-            # Sweep idle entries before applying the cap so we don't
-            # evict an active session just because we're full of stale
-            # ones we already could've reaped.
-            self._sweep_idle_locked()
-            if len(self._sessions) >= self._max:
-                if not self._evict_lru_locked():
-                    raise SessionCapacityError(
-                        "session capacity reached and all sessions are active"
-                    )
+                # Sweep idle entries before applying the cap so we don't
+                # evict an active session just because we're full of stale
+                # ones we already could've reaped.
+                victims.extend(self._sweep_idle_locked())
+                if len(self._sessions) >= self._max:
+                    victim = self._evict_lru_locked()
+                    if victim is None:
+                        raise SessionCapacityError(
+                            "session capacity reached and all sessions are active"
+                        )
+                    victims.append(victim)
 
-            runtime_or_coro = create(session_id, hooks)
-            if inspect.isawaitable(runtime_or_coro):
-                runtime = await runtime_or_coro
-            else:
-                runtime = runtime_or_coro
-            entry = SessionEntry(
-                runtime=runtime,
-                approve_event=asyncio.Event(),
-            )
-            self._sessions[session_id] = entry
-            return entry
+                runtime_or_coro = create(session_id, hooks)
+                if inspect.isawaitable(runtime_or_coro):
+                    runtime = await runtime_or_coro
+                else:
+                    runtime = runtime_or_coro
+                entry = SessionEntry(
+                    runtime=runtime,
+                    approve_event=asyncio.Event(),
+                )
+                self._sessions[session_id] = entry
+        except BaseException:
+            # Sweep/eviction may already have detached victims from the map
+            # before creation failed; tear them down here or their sandbox
+            # sessions and store rows leak. The ``async with`` released the
+            # lock on the way out, so this runs outside it like the happy path.
+            for victim in victims:
+                await self._teardown_entry(victim)
+            raise
+        # Tear victims down *after* releasing the registry lock: teardown is
+        # arbitrary host code (sandbox destroy, store deletes) and must never
+        # run while the registry is serialised against creation.
+        for victim in victims:
+            await self._teardown_entry(victim)
+        return entry
 
     def remove(self, session_id: str) -> SessionEntry | None:
-        return self._sessions.pop(session_id, None)
+        entry = self._sessions.pop(session_id, None)
+        if entry is not None:
+            self._schedule_teardown(entry)
+        return entry
+
+    async def aclose(self) -> None:
+        """Tear down every live session. Safe to call multiple times."""
+        async with self._lock:
+            entries = list(self._sessions.values())
+            self._sessions.clear()
+        for entry in entries:
+            await self._teardown_entry(entry)
+        if self._pending_teardowns:
+            await asyncio.gather(*list(self._pending_teardowns), return_exceptions=True)
 
     def __len__(self) -> int:
         return len(self._sessions)
@@ -119,6 +152,35 @@ class SessionRegistry:
         return session_id in self._sessions
 
     # ── internal ────────────────────────────────────────────────────────
+
+    async def _teardown_entry(self, entry: SessionEntry) -> None:
+        """Run the runtime's async teardown if it exposes one.
+
+        ``getattr`` keeps arbitrary host runtimes (including fakes and
+        non-sandbox ToolRuntimes) compatible.
+        """
+        closer = getattr(entry.runtime, "aclose", None)
+        if closer is None:
+            return
+        try:
+            result = closer()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            # Teardown is best-effort: a failing session must not break
+            # eviction or shutdown for its siblings.
+            pass
+
+    def _schedule_teardown(self, entry: SessionEntry) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop (e.g. a host calling ``remove`` synchronously
+            # outside async context): nothing we can await here.
+            return
+        task = loop.create_task(self._teardown_entry(entry))
+        self._pending_teardowns.add(task)
+        task.add_done_callback(self._pending_teardowns.discard)
 
     def _is_idle_expired(self, entry: SessionEntry) -> bool:
         if self._is_protected(entry):
@@ -138,26 +200,27 @@ class SessionRegistry:
             or entry.approve_event.is_set()
         )
 
-    def _sweep_idle_locked(self) -> None:
+    def _sweep_idle_locked(self) -> list[SessionEntry]:
         if self._ttl <= 0:
-            return
+            return []
         # Materialise the iteration so we can mutate the dict.
         stale = [
-            key
+            (key, entry)
             for key, entry in self._sessions.items()
             if self._is_idle_expired(entry)
         ]
-        for k in stale:
-            self._sessions.pop(k, None)
+        for key, _ in stale:
+            self._sessions.pop(key, None)
+        return [entry for _, entry in stale]
 
-    def _evict_lru_locked(self) -> bool:
+    def _evict_lru_locked(self) -> SessionEntry | None:
         candidates = [
             item
             for item in self._sessions.items()
             if not self._is_protected(item[1])
         ]
         if not candidates:
-            return False
-        victim = min(candidates, key=lambda item: item[1].last_used)[0]
-        self._sessions.pop(victim, None)
-        return True
+            return None
+        victim_key, victim = min(candidates, key=lambda item: item[1].last_used)
+        self._sessions.pop(victim_key, None)
+        return victim

@@ -22,6 +22,7 @@ Hardened against the historical issues:
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import hmac
 import os
 import sys
@@ -83,7 +84,22 @@ def create_gateway(options: GatewayOptions) -> FastAPI:
             flush=True,
         )
 
-    app = FastAPI(title="TitanX Gateway", docs_url=None, redoc_url=None)
+    sessions = SessionRegistry(
+        max_sessions=options.max_sessions,
+        idle_ttl_seconds=options.session_idle_ttl_seconds,
+    )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Bounded sessions are meaningless if eviction only drops dict rows:
+        # shutting the gateway down must destroy sandbox sessions and release
+        # per-session store rows, or containers/disk grow without limit.
+        try:
+            yield
+        finally:
+            await sessions.aclose()
+
+    app = FastAPI(title="TitanX Gateway", docs_url=None, redoc_url=None, lifespan=lifespan)
 
     app.add_middleware(
         CORSMiddleware,
@@ -109,11 +125,6 @@ def create_gateway(options: GatewayOptions) -> FastAPI:
                 from fastapi.responses import JSONResponse
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
         return await call_next(request)
-
-    sessions = SessionRegistry(
-        max_sessions=options.max_sessions,
-        idle_ttl_seconds=options.session_idle_ttl_seconds,
-    )
 
     app.include_router(chat_router(sessions, options), prefix="/api/chat")
     app.include_router(memory_router(options), prefix="/api/memory")

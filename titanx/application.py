@@ -199,7 +199,19 @@ class DemoApplication:
         if tools is not None:
             # Only the synthetic walkthrough substitutes an in-process fixture.
             # Normal terminal and gateway sessions retain the sandbox factory.
-            return AgentRuntime(tools=tools, **shared)
+            # Deny-by-default: the application authorises its own fixture tools
+            # (plus the injected context tools) explicitly.
+            from .context.manager import CONTEXT_TOOL_NAMES
+            from .policy import AgentPolicy, PolicyStore
+            allowlist = sorted(
+                {tool.name for tool in tools.list_tools() if not tool.requires_approval}
+                | set(CONTEXT_TOOL_NAMES)
+            )
+            return AgentRuntime(
+                tools=tools,
+                policy_store=PolicyStore(AgentPolicy(tool_allowlist=allowlist)),
+                **shared,
+            )
         return create_sandboxed_runtime(CreateSandboxedRuntimeOptions(**shared))
 
     async def close(self):

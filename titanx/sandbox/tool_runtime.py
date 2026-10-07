@@ -71,6 +71,10 @@ class SandboxedToolRuntime(ToolRuntime):
     def list_tools(self) -> list[ToolDefinition]:
         return [h.definition for h in self._handlers.values()]
 
+    async def aclose(self) -> None:
+        """Destroy every live sandbox session. Safe to call multiple times."""
+        await self._sessions.aclose()
+
     async def execute(self, name: str, params: dict[str, Any]) -> ToolExecutionResult:
         handler = self._handlers.get(name)
         if not handler:

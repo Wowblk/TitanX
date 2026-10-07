@@ -22,7 +22,7 @@ from titanx.types import (
     RuntimeHooks, ToolCall, ToolDefinition, ToolExecutionResult,
     ToolMessage, UserMessage,
 )
-from ._helpers import NullTools, SingleTool
+from ._helpers import NullTools, SingleTool, authorizing_policy_store
 from .test_context_compaction import RecordingLlm, RecordingStrategy, assert_complete_tool_groups
 
 
@@ -35,8 +35,10 @@ async def store(tmp_path):
 
 def runtime_with_store(store, llm, *, tools=None, strategy=None, options=None, context=None, **kwargs):
     events = []
+    runtime_tools = tools or NullTools()
+    kwargs.setdefault("policy_store", authorizing_policy_store(runtime_tools, include_context=True))
     runtime = AgentRuntime(
-        llm, tools or NullTools(), SafetyLayer(),
+        llm, runtime_tools, SafetyLayer(),
         context_options=context or ContextOptions(store, offload_threshold_chars=1500, preview_chars=150),
         compaction_options=options or CompactionOptions(12000, target_token_budget=7000),
         compaction_strategy=strategy or RecordingStrategy(),
@@ -501,7 +503,7 @@ async def test_compression_target_is_lower_than_trigger():
     assert result.failure_reason == "summary_target_not_reached"
 
 
-async def test_runtime_prefers_adapter_counter_and_passes_output_reserve():
+async def test_runtime_prefers_adapter_counter_and_keeps_output_reserve_in_budget():
     class CountingLlm(RecordingLlm):
         def __init__(self):
             super().__init__([LlmTurnResult(type="text", text="done")])
@@ -515,9 +517,42 @@ async def test_runtime_prefers_adapter_counter_and_passes_output_reserve():
     runtime.set_task("current task")
     await runtime.run_prompt("new user input")
     assert options.input_budget == 70
-    assert llm.counted[0][0].max_output_tokens == 20
+    # reserved_output_tokens is a compaction input-budget reservation only; it
+    # must never be smuggled into the provider generation cap on AgentConfig.
+    assert llm.counted[0][0].max_output_tokens is None
     assert llm.counted[0][1] == llm.inputs[0]
     assert any("current task" in m.content for m in llm.counted[0][1])
+
+
+async def test_runtime_forwards_host_max_output_tokens_to_adapter():
+    class CountingLlm(RecordingLlm):
+        def __init__(self):
+            super().__init__([LlmTurnResult(type="text", text="done")])
+            self.counted = []
+        def count_input_tokens(self, config, messages):
+            self.counted.append((config, deepcopy(messages)))
+            return 10
+    llm = CountingLlm()
+    options = CompactionOptions(1000, model_context_window=100, reserved_output_tokens=20, safety_margin_tokens=10)
+    runtime = AgentRuntime(
+        llm, NullTools(), SafetyLayer(),
+        compaction_strategy=RecordingStrategy(), compaction_options=options,
+        max_output_tokens=42,
+    )
+    runtime.set_task("current task")
+    await runtime.run_prompt("new user input")
+    assert options.input_budget == 70
+    assert llm.counted[0][0].max_output_tokens == 42
+
+
+def test_create_config_rejects_invalid_max_output_tokens():
+    assert create_config().max_output_tokens is None
+    assert create_config(max_output_tokens=0).max_output_tokens == 0
+    assert create_config(max_output_tokens=128).max_output_tokens == 128
+    with pytest.raises(ValueError):
+        create_config(max_output_tokens=-1)
+    with pytest.raises(ValueError):
+        create_config(max_output_tokens=True)
 
 
 async def test_context_tool_cannot_select_session_or_request_unbounded_page(store):
@@ -541,9 +576,11 @@ async def test_offload_preserves_wrapper_and_only_archives_inspected_output(stor
             return ToolOutputSafetyResult("safe content " * 400, [], False)
     llm = RecordingLlm([LlmTurnResult(type="tool_calls", tool_calls=[ToolCall("a", "logs", {})]),
                         LlmTurnResult(type="text", text="done")])
-    runtime = AgentRuntime(llm, SingleTool(ToolDefinition("logs", "", {}), execute), InspectingSafety(),
+    tools = SingleTool(ToolDefinition("logs", "", {}), execute)
+    runtime = AgentRuntime(llm, tools, InspectingSafety(),
                            context_options=ContextOptions(store, offload_threshold_chars=2000, preview_chars=50),
-                           wrap_tool_output=True)
+                           wrap_tool_output=True,
+                           policy_store=authorizing_policy_store(tools, include_context=True))
     await runtime.run_prompt("read")
     message = next(m for m in runtime.state.messages if isinstance(m, ToolMessage))
     assert message.content.startswith('<tool_output tool="logs" trust="untrusted">')

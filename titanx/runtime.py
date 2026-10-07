@@ -54,6 +54,7 @@ class AgentRuntime:
         max_iterations: int = 10,
         auto_approve_tools: bool = False,
         wrap_tool_output: bool = False,
+        max_output_tokens: int | None = None,
         hooks: RuntimeHooks | None = None,
         policy_store=None,
         compaction_strategy=None,
@@ -65,10 +66,14 @@ class AgentRuntime:
         from .policy import AgentPolicy, AuditLog, PolicyStore
 
         available_tools = list(tools.list_tools())
+        injected_context_tools: list[str] = []
         if context_options is not None:
             from .context.manager import CONTEXT_TOOL_NAMES, context_tool_definitions
             if any(tool.name in CONTEXT_TOOL_NAMES for tool in available_tools):
                 raise ValueError("context_read and context_search are reserved when context management is enabled")
+            injected_context_tools = [
+                definition.name for definition in context_tool_definitions()
+            ]
             available_tools.extend(context_tool_definitions())
         self.config: AgentConfig = create_config(
             user_id=user_id,
@@ -78,12 +83,11 @@ class AgentRuntime:
             max_iterations=max_iterations,
             auto_approve_tools=auto_approve_tools,
             wrap_tool_output=wrap_tool_output,
+            max_output_tokens=max_output_tokens,
         )
         self.state: AgentState = create_initial_state()
         if context_options is not None and context_options.session_id is not None:
             self.config = replace(self.config, session_id=context_options.session_id)
-        if compaction_options is not None and compaction_options.reserved_output_tokens:
-            self.config = replace(self.config, max_output_tokens=compaction_options.reserved_output_tokens)
 
         self._llm = llm
         self._tools = tools
@@ -101,10 +105,14 @@ class AgentRuntime:
         # Always have a PolicyStore + AuditLog so every tool call is audited,
         # even when the caller did not configure dynamic policy.
         if policy_store is None:
+            # The runtime itself injects the context tools, so it also
+            # authorises them on the deny-by-default allowlist. Host tools are
+            # deliberately *not* seeded: the host must opt them in explicitly.
             policy_store = PolicyStore(
                 AgentPolicy(
                     auto_approve_tools=auto_approve_tools,
                     max_iterations=max_iterations,
+                    tool_allowlist=list(injected_context_tools),
                 ),
                 AuditLog(),
             )
@@ -123,16 +131,22 @@ class AgentRuntime:
                     count = counter(config, messages) if counter else None
                     return estimate_input_tokens(config, messages) if count is None else count
                 self._compaction_options = replace(compaction_options, token_estimator=count_current_input)
+        # One owner for wholesale transcript replacement, shared by offload
+        # (ContextManager) and compaction so neither can silently violate the
+        # pinned-message / single-summary / tool-group invariants.
+        from .context.transcript import Transcript
+        self._transcript = Transcript(self.config)
         self._context_manager = None
         if context_options is not None:
             from .context.manager import ContextManager
-            self._context_manager = ContextManager(context_options, self.config)
+            self._context_manager = ContextManager(context_options, self.config, transcript=self._transcript)
             if compaction_options is not None and compaction_strategy is None:
                 from .context.summary import LlmCompactionStrategy
                 self._compaction_strategy = LlmCompactionStrategy(llm)
         self._compaction_tracking = CompactionTracking()
         self._context_stop_reason: str | None = None
         self._context_completion_pending = False
+        self._closed = False
 
         self._approval_event: asyncio.Event = asyncio.Event()
         # ``reject_pending_tool`` intentionally stays synchronous for host/UI
@@ -142,6 +156,50 @@ class AgentRuntime:
         self._pending_host_rejections: list[tuple[str, str, str]] = []
 
     # ── Public API ────────────────────────────────────────────────────────────
+
+    @property
+    def transcript(self):
+        """The single owner of wholesale transcript replacement."""
+        return self._transcript
+
+    async def aclose(self) -> None:
+        """Tear down this runtime's session-scoped resources.
+
+        Idempotent and never raises. Flushes the transcript owner with a final
+        archive when context management is enabled, tears down the tool layer
+        (sandbox sessions) when it supports it, and deletes this session's rows
+        from the context store so evicted sessions cannot leak on disk.
+        """
+        if self._closed:
+            return
+        self._closed = True
+
+        if self._context_manager is not None:
+            try:
+                await self._context_manager.archive(self.state)
+            except Exception:
+                pass
+        try:
+            await self._transcript.aclose()
+        except Exception:
+            pass
+
+        closer = getattr(self._tools, "aclose", None)
+        if closer is not None:
+            try:
+                result = closer()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                pass
+
+        store = self._context_manager.options.store if self._context_manager is not None else None
+        delete_session = getattr(store, "delete_session", None)
+        if delete_session is not None:
+            try:
+                await delete_session(self.config.session_id)
+            except Exception:
+                pass
 
     def set_task(
         self, objective: str, *, constraints=(), acceptance_criteria=(), new_task: bool = False,
@@ -724,6 +782,7 @@ class AgentRuntime:
             config=self.config,
             store=self._context_manager.options.store if self._context_manager else None,
             store_timeout_seconds=self._context_manager.options.storage_timeout_seconds if self._context_manager else 10.0,
+            transcript=self._transcript,
         )
         self._compaction_tracking = compact.tracking
 

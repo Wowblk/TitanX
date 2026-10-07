@@ -151,7 +151,8 @@ class ExecutionGuard:
         return self._json({
             "name": tool.name, "description": tool.description,
             "parameters": tool.parameters, "requires_approval": tool.requires_approval,
-            "requires_sanitization": tool.requires_sanitization, "metadata": tool.metadata,
+            "requires_sanitization": tool.requires_sanitization,
+            "mandatory_approval": tool.mandatory_approval, "metadata": tool.metadata,
         })
 
     @staticmethod

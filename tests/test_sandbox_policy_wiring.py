@@ -30,7 +30,20 @@ from titanx.sandbox import (
     SandboxedToolRuntime,
     SandboxToolPolicy,
 )
-from titanx.types import LlmAdapter, LlmTurnResult, ToolDefinition
+from titanx.types import LlmAdapter, LlmTurnResult, ToolCall, ToolDefinition
+
+
+class _ScriptedLlm(LlmAdapter):
+    def __init__(self, responses: list[LlmTurnResult]) -> None:
+        self.responses = list(responses)
+        self.cursor = 0
+
+    async def respond(self, config, state) -> LlmTurnResult:
+        if self.cursor >= len(self.responses):
+            return LlmTurnResult(type="text", text="(done)")
+        resp = self.responses[self.cursor]
+        self.cursor += 1
+        return resp
 
 
 class _RecordingBackend(SandboxBackend):
@@ -153,3 +166,54 @@ class TestFactoryArmsEnforcement:
         assert denied.error == "path_not_allowed"
         assert len(backend.requests) == 1
         assert backend.requests[0].allowed_write_paths == ["/work"]
+
+
+class TestFactoryAuthorizesCustomHandlers:
+    """Deny-by-default (#4) is compliable through the factory, not just by hand.
+
+    A host that supplies ``requires_approval=False`` handlers has no approval
+    gate to fall back on, so the factory must offer a first-class allowlist —
+    otherwise the only escape is hand-building a whole ``PolicyStore``.
+    """
+
+    @staticmethod
+    def _scripted():
+        return _ScriptedLlm([
+            LlmTurnResult(type="tool_calls", tool_calls=[
+                ToolCall("c1", "run_command", _copy("/work/out")),
+            ]),
+            LlmTurnResult(type="text", text="done"),
+        ])
+
+    async def test_allowlisted_handler_is_dispatched(self) -> None:
+        backend = _RecordingBackend()
+        runtime = create_sandboxed_runtime(
+            CreateSandboxedRuntimeOptions(
+                llm=self._scripted(),
+                safety=SafetyLayer(),
+                backends=[backend],
+                tool_handlers=[_copy_handler()],
+                allowed_write_paths=["/work"],
+                tool_allowlist=["run_command"],
+            )
+        )
+
+        await runtime.run_prompt("run the copy")
+
+        assert len(backend.requests) == 1
+
+    async def test_unlisted_handler_is_denied_by_policy(self) -> None:
+        backend = _RecordingBackend()
+        runtime = create_sandboxed_runtime(
+            CreateSandboxedRuntimeOptions(
+                llm=self._scripted(),
+                safety=SafetyLayer(),
+                backends=[backend],
+                tool_handlers=[_copy_handler()],
+                allowed_write_paths=["/work"],
+            )
+        )
+
+        await runtime.run_prompt("run the copy")
+
+        assert backend.requests == []

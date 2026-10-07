@@ -8,15 +8,19 @@ from typing import Any
 import pytest
 
 from titanx import (
+    AgentPolicy,
+    AuditLog,
     McpAdmissionPolicy,
     McpAdmissionRuntime,
     McpContractPinMismatchError,
     McpNamespaceCollisionError,
     McpProtocolError,
     McpTransportError,
+    PolicyStore,
     input_schema_fingerprint,
     tool_contract_fingerprint,
 )
+from titanx.types import ToolCall
 
 
 OBJECT_SCHEMA = {"type": "object", "properties": {}}
@@ -638,3 +642,189 @@ def test_call_timeout_must_be_positive_and_finite(timeout):
 def test_mcp_resource_limits_must_be_positive_integers(field_name):
     with pytest.raises(ValueError, match="positive integer"):
         McpAdmissionPolicy(**{field_name: 0})
+
+
+# ── Shared policy plane integration (fix #3) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_admitted_tools_are_reflected_into_the_policy_allowlist():
+    tool = FakeTool("search", OBJECT_SCHEMA)
+    client = FakeClient(
+        [[tool], [tool]],
+        result=FakeCallToolResult(content=[FakeTextContent("ok")]),
+    )
+    policy = McpAdmissionPolicy(
+        allowed_servers={"github"},
+        allowed_tools={"github": {"search"}},
+        requires_approval=False,
+    )
+    store = PolicyStore(AgentPolicy())
+    runtime = McpAdmissionRuntime({"github": client}, policy, policy_store=store)
+
+    [definition] = await runtime.discover()
+
+    assert store.epoch >= 1
+    check = store.check_tool_call(
+        ToolCall("c1", definition.name, {}), definition
+    )
+    assert check.decision == "allow"
+    # The shared decision point now reflects the admitted MCP surface.
+    assert definition.name in store.get_policy().tool_allowlist
+
+
+@pytest.mark.asyncio
+async def test_policy_store_is_optional_and_admission_stays_standalone():
+    tool = FakeTool("search", OBJECT_SCHEMA)
+    client = FakeClient(
+        [[tool], [tool]],
+        result=FakeCallToolResult(content=[FakeTextContent("ok")]),
+    )
+    runtime = McpAdmissionRuntime({"github": client}, allow("github", "search"))
+
+    [definition] = await runtime.discover()
+    result = await runtime.execute("mcp__github__search", {})
+
+    assert definition.name == "mcp__github__search"
+    assert result.error is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_approval_requirement_is_mandatory_not_auto_approvable():
+    tool = FakeTool("search", OBJECT_SCHEMA)
+    runtime = McpAdmissionRuntime(
+        {"github": FakeClient([[tool]])},
+        allow("github", "search"),
+    )
+
+    [definition] = await runtime.discover()
+
+    assert definition.requires_approval is True
+    assert definition.mandatory_approval is True
+    store = PolicyStore(
+        AgentPolicy(auto_approve_tools=True, tool_allowlist=[definition.name])
+    )
+    check = store.check_tool_call(
+        ToolCall("c1", definition.name, {}), definition
+    )
+    assert check.decision == "needs_approval"
+
+
+@pytest.mark.asyncio
+async def test_mcp_non_approval_policy_is_not_mandatory():
+    tool = FakeTool("search", OBJECT_SCHEMA)
+    policy = McpAdmissionPolicy(
+        allowed_servers={"github"},
+        allowed_tools={"github": {"search"}},
+        requires_approval=False,
+    )
+    runtime = McpAdmissionRuntime({"github": FakeClient([[tool]])}, policy)
+
+    [definition] = await runtime.discover()
+
+    assert definition.requires_approval is False
+    assert definition.mandatory_approval is False
+
+
+@pytest.mark.asyncio
+async def test_discovery_allow_is_audited_with_policy_epoch():
+    tool = FakeTool("search", OBJECT_SCHEMA)
+    client = FakeClient([[tool], [tool]])
+    policy = McpAdmissionPolicy(
+        allowed_servers={"github"},
+        allowed_tools={"github": {"search"}},
+        requires_approval=False,
+    )
+    store = PolicyStore(AgentPolicy())
+    runtime = McpAdmissionRuntime({"github": client}, policy, policy_store=store)
+
+    await runtime.discover()
+
+    entries = [
+        entry
+        for entry in store.get_audit_log().get_entries()
+        if entry.event == "tool_decision"
+    ]
+    assert entries
+    assert all("policy_epoch" in entry.details for entry in entries)
+    assert any(
+        entry.decision == "allow"
+        and entry.tool_name == "mcp__github__search"
+        for entry in entries
+    )
+
+
+@pytest.mark.asyncio
+async def test_contract_pin_failure_is_audited_as_deny():
+    tool = FakeTool("search", OBJECT_SCHEMA, description="changed before boot")
+    policy = McpAdmissionPolicy(
+        allowed_servers={"github"},
+        allowed_tools={"github": {"search"}},
+        expected_contract_sha256={"github": {"search": "0" * 64}},
+    )
+    store = PolicyStore(AgentPolicy())
+    runtime = McpAdmissionRuntime(
+        {"github": FakeClient([[tool]])}, policy, policy_store=store
+    )
+
+    with pytest.raises(McpContractPinMismatchError):
+        await runtime.discover()
+
+    denies = [
+        entry
+        for entry in store.get_audit_log().get_entries()
+        if entry.event == "tool_decision" and entry.decision == "deny"
+    ]
+    assert denies
+    assert all("policy_epoch" in entry.details for entry in denies)
+
+
+@pytest.mark.asyncio
+async def test_contract_drift_on_execute_is_audited_as_deny():
+    before = FakeTool(
+        "search", {"type": "object", "properties": {"q": {"type": "string"}}}
+    )
+    after = FakeTool(
+        "search", {"type": "object", "properties": {"q": {"type": "integer"}}}
+    )
+    client = FakeClient([[before], [after]])
+    store = PolicyStore(AgentPolicy())
+    runtime = McpAdmissionRuntime(
+        {"github": client}, allow("github", "search"), policy_store=store
+    )
+    await runtime.discover()
+
+    result = await runtime.execute("mcp__github__search", {"q": "x"})
+
+    assert result.error == "mcp_schema_drift"
+    denies = [
+        entry
+        for entry in store.get_audit_log().get_entries()
+        if entry.event == "tool_decision" and entry.decision == "deny"
+    ]
+    assert denies
+    assert all("policy_epoch" in entry.details for entry in denies)
+
+
+@pytest.mark.asyncio
+async def test_broken_audit_backend_does_not_break_admission():
+    class BrokenAuditLog(AuditLog):
+        async def append(self, entry):  # type: ignore[override]
+            raise RuntimeError("audit backend unavailable")
+
+    tool = FakeTool("search", OBJECT_SCHEMA)
+    client = FakeClient(
+        [[tool], [tool]],
+        result=FakeCallToolResult(content=[FakeTextContent("ok")]),
+    )
+    store = PolicyStore(AgentPolicy(), BrokenAuditLog())
+    runtime = McpAdmissionRuntime(
+        {"github": client}, allow("github", "search"), policy_store=store
+    )
+
+    [definition] = await runtime.discover()
+    result = await runtime.execute("mcp__github__search", {})
+
+    assert definition.name == "mcp__github__search"
+    assert result.error is None
+    assert client.call_calls == [("search", {})]
