@@ -731,6 +731,8 @@ _CURL_REMOTE_NAME_LONGS = frozenset({
     "remote-name", "remote-name-all", "remote-header-name",
 })
 _WGET_SPIDER_LONGS = frozenset({"spider"})
+# The option that names the downloaded file / its destination directory.
+_WGET_OUTPUT_LONGS = frozenset({"output-document"})
 _WGET_DIR_LONGS = frozenset({"directory-prefix"})
 
 # Best-effort sets of the long options that consume a following argument, so
@@ -809,24 +811,25 @@ def _has_long(
     return False
 
 
-def _has_long_resolving_to(
-    tokens: list[str], name: str, family: frozenset[str],
-    value_shorts: frozenset[str], value_longs: frozenset[str],
-) -> bool:
-    """True if some long option resolves *unambiguously* to ``name``.
+def _ambiguous_long(
+    tokens: list[str], family: frozenset[str], value_shorts: frozenset[str],
+    value_longs: frozenset[str],
+) -> str | None:
+    """Return the first option token whose long name is an ambiguous prefix.
 
-    ``family`` must hold every long option of the verb that shares a prefix
-    with ``name`` (plus ``name`` itself). Resolving against the whole family
-    means a genuinely ambiguous prefix matches nothing: wget's ``--output``
-    is a prefix of both ``--output-document`` and ``--output-file``, so it
-    does *not* name ``name`` — the caller must then fail closed rather than
-    treat the write as named.
+    getopt resolves a long option by unique prefix; a spelling that prefixes
+    more than one member of ``family`` is rejected by the real tool, so the
+    scanner cannot know what the token means (or how many arguments it
+    takes). It must fail closed rather than guess — the same rule the
+    wrapper peel applies to unknown/ambiguous long options. wget's
+    ``--output`` is the case in point: a prefix of both ``--output-document``
+    and ``--output-file``.
     """
     for tok in _iter_option_positions(tokens, value_shorts, value_longs):
         split = _split_long(tok)
-        if split is not None and _abbrev(split[0], family)[0] == name:
-            return True
-    return False
+        if split is not None and _abbrev(split[0], family)[1]:
+            return tok
+    return None
 
 
 def _output_target(
@@ -877,13 +880,22 @@ def _output_target(
 
 
 def _h_wget(tokens: list[str], *, cwd: str | None):
-    # wget's three output-ish long options share the `output-`/`output` prefix,
-    # so every pass resolves an abbreviation against all of them: `--output`
-    # is *ambiguous* (matches both `--output-document` and `--output-file`)
-    # and must be claimed by neither.
+    # wget's three output-ish long options share the `output-`/`output`
+    # prefix, so an abbreviation is resolved against all of them: `--output`
+    # is a prefix of BOTH `--output-document` and `--output-file`, i.e.
+    # genuinely ambiguous, so the real tool rejects it and the scanner cannot
+    # know whether it names a file, a log, or a directory — fail closed.
     _wget_out_longs = frozenset(
         {"output-document", "output-file", "directory-prefix"}
     )
+    ambiguous = _ambiguous_long(
+        tokens, _wget_out_longs, _WGET_VALUE_SHORTS, _WGET_VALUE_LONGS
+    )
+    if ambiguous is not None:
+        return [], (
+            f"wget option {ambiguous!r} is an ambiguous abbreviation — its "
+            "target cannot be determined; refusing"
+        )
     # `-O`/`--output-document` names the downloaded file.
     targets, refuse = _output_target(
         tokens, letter="O", long_name="output-document",
@@ -906,15 +918,13 @@ def _h_wget(tokens: list[str], *, cwd: str | None):
         targets.extend(extra)
     # Without `-O` (or a `-P` destination the write is confined to), wget
     # writes the server-chosen name into the sandbox cwd — unnamed, so
-    # refuse. `-o` (a separate log file) does NOT name the download. An
-    # *ambiguous* long prefix (`--output`/`--out`) must resolve to nothing:
-    # treating it as `-O` would let an unnamed write pass, so it is resolved
-    # against the whole output family and thus counts as unnamed.
+    # refuse. `-o` (a separate log file) does NOT name the download. (An
+    # ambiguous long form was already refused above, so a spelling reaching
+    # here resolves to a single option.)
     named = _has_short(
         tokens, "O", _WGET_VALUE_SHORTS, _WGET_VALUE_LONGS
-    ) or _has_long_resolving_to(
-        tokens, "output-document", _wget_out_longs,
-        _WGET_VALUE_SHORTS, _WGET_VALUE_LONGS,
+    ) or _has_long(
+        tokens, _WGET_OUTPUT_LONGS, _WGET_VALUE_SHORTS, _WGET_VALUE_LONGS
     )
     confined = _has_short(
         tokens, "P", _WGET_VALUE_SHORTS, _WGET_VALUE_LONGS

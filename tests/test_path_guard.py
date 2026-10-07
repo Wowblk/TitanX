@@ -535,6 +535,17 @@ class TestUnnamedWriteTargets:
         "wget --out /etc/x http://h/x",
         "wget --output- /etc/x http://h/x",
         "wget --output= http://h/x",
+        # The ambiguity must be refused on its own terms, not via the
+        # "unnamed download" path: here a `-O-`/`--spider` token that would
+        # otherwise satisfy `named`/`spider` follows, so a check keyed on
+        # those heuristics would let the command through. If the ambiguous
+        # `--output` is (on a wget lacking `--output-file`) taken as
+        # `--output-document`, it consumes that token as its argument and
+        # writes a file named `-O-`.
+        "wget --output -O- http://h/x",
+        "wget --out -O- http://h/x",
+        "wget --output --spider http://h/x",
+        "wget --output --output-document=- http://h/x",
     ])
     def test_ambiguous_output_prefix_is_refused(self, command: str) -> None:
         assert scan_shell_write_targets(command).refuse_reason is not None
