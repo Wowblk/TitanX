@@ -42,11 +42,13 @@ def _runtime_with_tool(
     policy: AgentPolicy | None = None,
     store: PolicyStore | None = None,
     hooks: RuntimeHooks | None = None,
+    requires_approval: bool = False,
 ) -> AgentRuntime:
     defn = ToolDefinition(
         name="ping",
         description="ping",
         parameters={"type": "object", "properties": {}},
+        requires_approval=requires_approval,
     )
 
     async def handler(_name: str, _params: dict) -> ToolExecutionResult:
@@ -298,3 +300,125 @@ def test_validate_policy_accepts_none_or_positive_max_total_tokens():
 def test_validate_policy_rejects_non_bool_halt(value):
     with pytest.raises(PolicyValidationError):
         validate_policy(AgentPolicy(halt=value))
+
+
+# ── Integrity of the counter the budget is enforced against ─────────────────
+
+
+async def test_exact_boundary_used_equals_budget_stops():
+    events: list = []
+    hooks = RuntimeHooks(on_event=lambda e, _c, _s: events.append(e))
+    # 50 + 50 == 100 exactly at the ceiling; the next turn must be withheld.
+    llm = ScriptedLlm([
+        _tool_turn(input_tokens=50, output_tokens=50),
+        LlmTurnResult(type="text", text="must not run"),
+    ])
+    runtime = _runtime_with_tool(
+        llm,
+        hooks=hooks,
+        policy=AgentPolicy(tool_allowlist=["ping"], max_total_tokens=100),
+    )
+
+    await runtime.run_prompt("hi")
+
+    assert llm.cursor == 1
+    assert _loop_end_reasons(events) == ["budget_exhausted"]
+
+
+async def test_negative_usage_cannot_understate_the_budget():
+    events: list = []
+    hooks = RuntimeHooks(on_event=lambda e, _c, _s: events.append(e))
+    # A misreporting adapter must not be able to walk the running total
+    # backwards: each turn's contribution is clamped at zero, so (500, -400)
+    # counts as 500, not 100. Without the clamp this run would keep spending.
+    llm = ScriptedLlm([
+        _tool_turn(input_tokens=500, output_tokens=-400, call_id="a"),
+        _tool_turn(input_tokens=500, output_tokens=-400, call_id="b"),
+        _tool_turn(input_tokens=500, output_tokens=-400, call_id="c"),
+        LlmTurnResult(type="text", text="must not run"),
+    ])
+    runtime = _runtime_with_tool(
+        llm,
+        hooks=hooks,
+        policy=AgentPolicy(tool_allowlist=["ping"], max_total_tokens=1000),
+    )
+
+    await runtime.run_prompt("hi")
+
+    assert llm.cursor == 2, "clamped sum reaches 1000 after two turns"
+    assert _loop_end_reasons(events) == ["budget_exhausted"]
+
+
+async def test_unreported_usage_with_a_budget_is_audited_once():
+    store = PolicyStore(AgentPolicy(tool_allowlist=["ping"], max_total_tokens=100))
+    # No usage at all: the budget is unenforceable. That must not be silent.
+    llm = ScriptedLlm([
+        LlmTurnResult(type="tool_calls", tool_calls=[ToolCall(id="a", name="ping", args={})]),
+        LlmTurnResult(type="tool_calls", tool_calls=[ToolCall(id="b", name="ping", args={})]),
+        LlmTurnResult(type="text", text="done"),
+    ])
+    runtime = _runtime_with_tool(llm, store=store)
+
+    await runtime.run_prompt("hi")
+
+    entries = [
+        e for e in store.get_audit_log().get_entries() if e.event == "budget_unenforceable"
+    ]
+    assert len(entries) == 1, "warned exactly once, not once per turn"
+    assert entries[0].actor == "system"
+
+
+async def test_refused_prompt_does_not_grow_the_transcript():
+    events: list = []
+    hooks = RuntimeHooks(on_event=lambda e, _c, _s: events.append(e))
+    llm = ScriptedLlm([
+        LlmTurnResult(
+            type="text", text="answer", usage=LlmUsage(input_tokens=60, output_tokens=60)
+        ),
+        LlmTurnResult(type="text", text="must not run"),
+    ])
+    runtime = _runtime_with_tool(
+        llm,
+        hooks=hooks,
+        policy=AgentPolicy(tool_allowlist=["ping"], max_total_tokens=100),
+    )
+
+    state = await runtime.run_prompt("one")
+    assert llm.cursor == 1
+    after_first = len(state.messages)
+
+    # A client that keeps hammering an exhausted session must not be able to
+    # grow the transcript without bound.
+    for _ in range(5):
+        await runtime.run_prompt("spam")
+
+    assert llm.cursor == 1
+    assert len(runtime.state.messages) == after_first
+
+
+async def test_approval_pause_drains_batch_then_stops_on_exhausted_budget():
+    events: list = []
+    hooks = RuntimeHooks(on_event=lambda e, _c, _s: events.append(e))
+    llm = ScriptedLlm([
+        _tool_turn(input_tokens=60, output_tokens=60),
+        LlmTurnResult(type="text", text="must not run"),
+    ])
+    runtime = _runtime_with_tool(
+        llm,
+        hooks=hooks,
+        policy=AgentPolicy(tool_allowlist=["ping"], max_total_tokens=100),
+        requires_approval=True,
+    )
+
+    # First pass pauses for approval; the budget is already crossed.
+    await runtime.run_prompt("hi")
+    assert runtime.state.pending_approval is not None
+    assert _loop_end_reasons(events) == ["pending_approval"]
+
+    runtime.approve_pending_tool()
+    await runtime.resume()
+
+    # The paused batch must still drain (protocol integrity), then the loop
+    # stops on the budget before any further model call.
+    assert llm.cursor == 1
+    assert _loop_end_reasons(events) == ["pending_approval", "budget_exhausted"]

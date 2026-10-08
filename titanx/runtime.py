@@ -152,6 +152,9 @@ class AgentRuntime:
         self._compaction_tracking = CompactionTracking()
         self._recovery = ContextRecovery()
         self._closed = False
+        # One-shot latch: warn at most once per session that a configured
+        # token budget is unenforceable because the adapter reports no usage.
+        self._budget_usage_warned = False
 
         # ``reject_pending_tool`` intentionally stays synchronous for host/UI
         # compatibility. Its ToolMessage is committed immediately, while the
@@ -350,6 +353,17 @@ class AgentRuntime:
         if not input_check.safe:
             blocked = [v.pattern for v in input_check.violations if v.action == "block"]
             raise ValueError(f"Unsafe input blocked: {', '.join(blocked)}")
+
+        # Refuse before recording the message. A session already over budget or
+        # halted must not accept new work, and — just as important — must not
+        # grow the transcript without bound when a client keeps re-prompting an
+        # exhausted session. (The loop-top guard then covers a budget crossed
+        # mid-run.)
+        consumption_reason = self._consumption_stop_reason()
+        if consumption_reason is not None:
+            self.state.signal = "stop"
+            await self._stop_for_consumption(consumption_reason)
+            return self.state
 
         user_msg = UserMessage(role="user", content=input_check.sanitized_content)
         append_message(self.state, user_msg)
@@ -647,11 +661,29 @@ class AgentRuntime:
             turn = await self._llm.respond(copy.deepcopy(self.config), model_state)
             # Two-counter token accounting:
             #   - last_input_tokens: this turn's provider-reported prompt size.
-            #   - total_input_tokens: cumulative across the session, used only
-            #     for cost reporting. NEVER feed this into the budget check.
-            self.state.last_input_tokens = turn.usage.input_tokens if turn.usage else 0
-            self.state.total_input_tokens += (turn.usage.input_tokens if turn.usage else 0)
-            self.state.total_output_tokens += (turn.usage.output_tokens if turn.usage else 0)
+            #   - total_input_tokens: cumulative across the session.
+            # The cumulative totals feed the session consumption budget, so a
+            # turn's contribution is clamped at zero: a misreporting adapter
+            # must not be able to walk the running total backwards and keep the
+            # budget gate from ever firing.
+            usage = turn.usage
+            self.state.last_input_tokens = usage.input_tokens if usage else 0
+            self.state.total_input_tokens += max(0, usage.input_tokens) if usage else 0
+            self.state.total_output_tokens += max(0, usage.output_tokens) if usage else 0
+            # A budgeted session whose adapter reports nothing is silently
+            # unprotected. Surface that once so the failure is not invisible.
+            if usage is None and not self._budget_usage_warned:
+                self._budget_usage_warned = True
+                if self._policy_store.get_policy().max_total_tokens is not None:
+                    await self._audit_log.append(AuditEntry(
+                        timestamp=now_iso(),
+                        event="budget_unenforceable",
+                        actor="system",
+                        reason=(
+                            "LLM adapter reported no token usage while a session token "
+                            "budget is set; the budget cannot be enforced"
+                        ),
+                    ))
 
             if turn.type == "text":
                 text = turn.text or ""
