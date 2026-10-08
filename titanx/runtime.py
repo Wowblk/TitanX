@@ -155,6 +155,10 @@ class AgentRuntime:
         # One-shot latch: warn at most once per session that a configured
         # token budget is unenforceable because the adapter reports no usage.
         self._budget_usage_warned = False
+        # One-shot latch: the durable consumption-stop record is written on the
+        # first stop only, so a client hammering an exhausted/halted session
+        # cannot grow the audit log without bound. Per-call events still fire.
+        self._consumption_stop_audited = False
 
         # ``reject_pending_tool`` intentionally stays synchronous for host/UI
         # compatibility. Its ToolMessage is committed immediately, while the
@@ -362,6 +366,9 @@ class AgentRuntime:
         consumption_reason = self._consumption_stop_reason()
         if consumption_reason is not None:
             self.state.signal = "stop"
+            # Pair the refusal's loop_end with a loop_start so hosts that
+            # bracket start/end see a well-formed stream even though no work ran.
+            await self._emit(LoopStartEvent())
             await self._stop_for_consumption(consumption_reason)
             return self.state
 
@@ -488,32 +495,41 @@ class AgentRuntime:
     async def _stop_for_consumption(self, reason: str) -> None:
         """Audit + announce a consumption stop, then end the loop.
 
-        The audit entry is written before the event so a host that reacts to
-        the event can already query the durable record.
+        The durable audit entry is written on the *first* stop of the session
+        only (``self._consumption_stop_audited``): a client that keeps
+        re-prompting an exhausted/halted session would otherwise append one
+        record per refusal, unbounded. The event itself still fires on every
+        call so the host observes each refusal. The entry is written before the
+        event so a host reacting to the event can already query the record.
         """
         used = self.state.total_input_tokens + self.state.total_output_tokens
+        # Only reachable with a non-None policy budget, but another task could
+        # disable it between the check and this report; keep the field an int.
+        budget = self._policy_store.get_policy().max_total_tokens
+        reported_budget = budget if budget is not None else used
+
+        if not self._consumption_stop_audited:
+            self._consumption_stop_audited = True
+            if reason == "halted":
+                await self._audit_log.append(AuditEntry(
+                    timestamp=now_iso(),
+                    event="halted",
+                    actor="system",
+                    reason="runtime halt kill switch is active",
+                ))
+            else:
+                await self._audit_log.append(AuditEntry(
+                    timestamp=now_iso(),
+                    event="budget_exhausted",
+                    actor="system",
+                    reason=f"session token budget reached: {used} >= {reported_budget}",
+                    details={"tokens_used": used, "budget": reported_budget},
+                ))
+
         if reason == "halted":
-            await self._audit_log.append(AuditEntry(
-                timestamp=now_iso(),
-                event="halted",
-                actor="system",
-                reason="runtime halt kill switch is active",
-            ))
             await self._emit(RuntimeHaltedEvent())
         else:
-            budget = self._policy_store.get_policy().max_total_tokens
-            if budget is None:
-                # Only reachable if another task disabled the budget between
-                # the check and this report; keep the field an int.
-                budget = used
-            await self._audit_log.append(AuditEntry(
-                timestamp=now_iso(),
-                event="budget_exhausted",
-                actor="system",
-                reason=f"session token budget reached: {used} >= {budget}",
-                details={"tokens_used": used, "budget": budget},
-            ))
-            await self._emit(BudgetExhaustedEvent(tokens_used=used, budget=budget))
+            await self._emit(BudgetExhaustedEvent(tokens_used=used, budget=reported_budget))
         await self._finish_loop(reason)
 
     async def _run_loop(self) -> AgentState:
@@ -667,12 +683,18 @@ class AgentRuntime:
             # must not be able to walk the running total backwards and keep the
             # budget gate from ever firing.
             usage = turn.usage
-            self.state.last_input_tokens = usage.input_tokens if usage else 0
-            self.state.total_input_tokens += max(0, usage.input_tokens) if usage else 0
-            self.state.total_output_tokens += max(0, usage.output_tokens) if usage else 0
-            # A budgeted session whose adapter reports nothing is silently
-            # unprotected. Surface that once so the failure is not invisible.
-            if usage is None and not self._budget_usage_warned:
+            # A missing usage object and a present-but-zero one are treated
+            # alike: neither can advance the cumulative counter, so both leave
+            # the ceiling inert. A real turn always consumes tokens, so 0/0 is
+            # indistinguishable from "no accounting".
+            turn_input = usage.input_tokens if usage and usage.input_tokens is not None else 0
+            turn_output = usage.output_tokens if usage and usage.output_tokens is not None else 0
+            self.state.last_input_tokens = turn_input
+            self.state.total_input_tokens += max(0, turn_input)
+            self.state.total_output_tokens += max(0, turn_output)
+            # A budgeted session whose adapter reports no usable usage is
+            # silently unprotected. Surface that once so it is not invisible.
+            if turn_input <= 0 and turn_output <= 0 and not self._budget_usage_warned:
                 self._budget_usage_warned = True
                 if self._policy_store.get_policy().max_total_tokens is not None:
                     await self._audit_log.append(AuditEntry(

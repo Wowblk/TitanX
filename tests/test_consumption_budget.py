@@ -22,10 +22,12 @@ from titanx.policy import AgentPolicy, PolicyStore, PolicyValidationError, valid
 from titanx.runtime import AgentRuntime
 from titanx.safety.safety_layer import SafetyLayer
 from titanx.types import (
+    AssistantToolCallsEvent,
     BudgetExhaustedEvent,
     LlmTurnResult,
     LlmUsage,
     LoopEndEvent,
+    LoopStartEvent,
     RuntimeHaltedEvent,
     RuntimeHooks,
     ToolCall,
@@ -422,3 +424,110 @@ async def test_approval_pause_drains_batch_then_stops_on_exhausted_budget():
     # stops on the budget before any further model call.
     assert llm.cursor == 1
     assert _loop_end_reasons(events) == ["pending_approval", "budget_exhausted"]
+
+
+# ── Adversarial-review hardening ────────────────────────────────────────────
+
+
+async def test_present_zero_usage_with_a_budget_is_audited_once():
+    # A present-but-zero usage object is indistinguishable from no accounting:
+    # neither can advance the cumulative counter, so the ceiling is inert. A
+    # real turn always consumes tokens, so 0/0 must trip the same one-shot
+    # "unenforceable" warning as usage=None — otherwise the failure is silent.
+    store = PolicyStore(AgentPolicy(tool_allowlist=["ping"], max_total_tokens=100))
+    llm = ScriptedLlm([
+        _tool_turn(input_tokens=0, output_tokens=0, call_id="a"),
+        _tool_turn(input_tokens=0, output_tokens=0, call_id="b"),
+        LlmTurnResult(type="text", text="done", usage=LlmUsage(0, 0)),
+    ])
+    runtime = _runtime_with_tool(llm, store=store)
+
+    await runtime.run_prompt("hi")
+
+    entries = [
+        e for e in store.get_audit_log().get_entries() if e.event == "budget_unenforceable"
+    ]
+    assert len(entries) == 1, "a zero-reporting adapter must not be silently unprotected"
+    assert entries[0].actor == "system"
+
+
+async def test_refused_prompts_do_not_grow_the_audit_log():
+    store = PolicyStore(AgentPolicy(tool_allowlist=["ping"], max_total_tokens=100))
+    llm = ScriptedLlm([
+        LlmTurnResult(
+            type="text", text="answer", usage=LlmUsage(input_tokens=60, output_tokens=60)
+        ),
+        LlmTurnResult(type="text", text="must not run"),
+    ])
+    runtime = _runtime_with_tool(llm, store=store)
+
+    await runtime.run_prompt("one")
+    exhausted = lambda: [
+        e for e in store.get_audit_log().get_entries() if e.event == "budget_exhausted"
+    ]
+    # The budget was crossed by the terminal answer turn, so the session is now
+    # exhausted; the first *refusal* is the next prompt.
+    assert llm.cursor == 1
+    await runtime.run_prompt("two")
+    assert len(exhausted()) == 1
+
+    # A client that keeps hammering an exhausted session must not be able to
+    # grow the durable audit log one entry per refusal.
+    for _ in range(5):
+        await runtime.run_prompt("spam")
+
+    assert len(exhausted()) == 1, "one forensic record per stopped session, not per refusal"
+
+
+async def test_refusal_path_emits_paired_loop_start_and_end():
+    events: list = []
+    hooks = RuntimeHooks(on_event=lambda e, _c, _s: events.append(e))
+    llm = ScriptedLlm([
+        LlmTurnResult(
+            type="text", text="answer", usage=LlmUsage(input_tokens=60, output_tokens=60)
+        ),
+        LlmTurnResult(type="text", text="must not run"),
+    ])
+    runtime = _runtime_with_tool(
+        llm,
+        hooks=hooks,
+        policy=AgentPolicy(tool_allowlist=["ping"], max_total_tokens=100),
+    )
+
+    await runtime.run_prompt("one")
+    events.clear()
+    await runtime.run_prompt("two")
+
+    # A host that brackets start/end must see a well-formed stream even when the
+    # prompt is refused before any work runs.
+    assert any(isinstance(e, LoopStartEvent) for e in events)
+    assert any(isinstance(e, LoopEndEvent) for e in events)
+
+
+async def test_halt_raised_mid_run_stops_before_the_next_llm_call():
+    # Pins the *loop-top* halt branch specifically: halt becomes true after the
+    # first model call but before the second, so only the in-loop guard can stop
+    # it. (The run_prompt-level guard is already covered by the start-of-prompt
+    # halt tests and would not exercise this path.)
+    events: list = []
+    store = PolicyStore(AgentPolicy(tool_allowlist=["ping"]))
+    raised = {"done": False}
+
+    async def on_event(event, _config, _state):
+        events.append(event)
+        if isinstance(event, AssistantToolCallsEvent) and not raised["done"]:
+            raised["done"] = True
+            policy = store.get_policy()
+            policy.halt = True
+            await store.set(policy, "operator kill switch mid-run")
+
+    llm = ScriptedLlm([
+        _tool_turn(call_id="a"),
+        LlmTurnResult(type="text", text="second must not run"),
+    ])
+    runtime = _runtime_with_tool(llm, store=store, hooks=RuntimeHooks(on_event=on_event))
+
+    await runtime.run_prompt("hi")
+
+    assert llm.cursor == 1, "halt raised between iterations must withhold the next model call"
+    assert _loop_end_reasons(events) == ["halted"]
