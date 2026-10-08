@@ -18,6 +18,16 @@ AuditEvent = Literal[
     "tool_decision",
     "tool_invocation",
     "compaction",
+    # Consumption stops (OWASP LLM06:2026). The runtime withholds the next
+    # model call when the session token budget is reached or the halt kill
+    # switch is raised; both leave the same audited trail as a policy change,
+    # so a denial-of-wallet attempt is attributable after the fact.
+    "budget_exhausted",
+    "halted",
+    # A budgeted session whose adapter reported no usage: the ceiling is
+    # configured but unenforceable. Surfaced once per session so the control
+    # is never silently inert.
+    "budget_unenforceable",
 ]
 
 AuditActor = Literal["host", "system", "agent"]
@@ -52,6 +62,28 @@ class AgentPolicy:
     # the same way; this brings the SDK to parity. ``None`` (default)
     # disables the check; the audit CLI flags policies without a pin.
     image_digest: str | None = None
+    # Session-cumulative token ceiling (input + output) for defence against
+    # unbounded consumption / denial-of-wallet (OWASP LLM06:2026). The runtime
+    # counts provider-reported usage across the *whole* session — resetting
+    # ``max_iterations`` per prompt does not reset this — and withholds the
+    # next LLM call once the sum reaches the budget. ``None`` (default) means
+    # no ceiling. Cost (USD) is deliberately not modelled here: the SDK has no
+    # pricing knowledge; hosts map tokens to money off the audit trail.
+    # NOTE: the counter is *provider-reported* usage, clamped at zero per turn
+    # so a misreporting adapter cannot walk it backwards. An adapter that
+    # returns ``usage=None`` (or omits it) contributes nothing; the runtime
+    # records a one-shot ``budget_unenforceable`` audit entry so a budgeted
+    # session with an accounting-less adapter is not silently unprotected.
+    # The ceiling covers *conversation* turns: when compaction runs, the
+    # summarizer's own model calls are reported on ``CompactionTriggeredEvent``
+    # (``summary_input_tokens``/``summary_output_tokens``) but are not folded
+    # into this counter.
+    max_total_tokens: int | None = None
+    # Kill switch. When true the runtime withholds the next LLM turn and ends
+    # the loop with reason ``"halted"``. Raising it through ``PolicyStore.set``
+    # (rather than mutating the live policy in place) makes the stop audited and
+    # reversible via ``rollback`` — the same trail as any other policy change.
+    halt: bool = False
 
 
 @dataclass

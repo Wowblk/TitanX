@@ -26,6 +26,7 @@ from .types import (
     AssistantMessage,
     AssistantTextEvent,
     AssistantToolCallsEvent,
+    BudgetExhaustedEvent,
     CompactionBlockedEvent,
     CompactionExhaustedEvent,
     CompactionFailedEvent,
@@ -36,6 +37,7 @@ from .types import (
     LoopStartEvent,
     PendingApproval,
     RuntimeEvent,
+    RuntimeHaltedEvent,
     RuntimeHooks,
     SafetyLayerLike,
     ToolCall,
@@ -150,6 +152,13 @@ class AgentRuntime:
         self._compaction_tracking = CompactionTracking()
         self._recovery = ContextRecovery()
         self._closed = False
+        # One-shot latch: warn at most once per session that a configured
+        # token budget is unenforceable because the adapter reports no usage.
+        self._budget_usage_warned = False
+        # One-shot latch: the durable consumption-stop record is written on the
+        # first stop only, so a client hammering an exhausted/halted session
+        # cannot grow the audit log without bound. Per-call events still fire.
+        self._consumption_stop_audited = False
 
         # ``reject_pending_tool`` intentionally stays synchronous for host/UI
         # compatibility. Its ToolMessage is committed immediately, while the
@@ -349,6 +358,20 @@ class AgentRuntime:
             blocked = [v.pattern for v in input_check.violations if v.action == "block"]
             raise ValueError(f"Unsafe input blocked: {', '.join(blocked)}")
 
+        # Refuse before recording the message. A session already over budget or
+        # halted must not accept new work, and — just as important — must not
+        # grow the transcript without bound when a client keeps re-prompting an
+        # exhausted session. (The loop-top guard then covers a budget crossed
+        # mid-run.)
+        consumption_reason = self._consumption_stop_reason()
+        if consumption_reason is not None:
+            self.state.signal = "stop"
+            # Pair the refusal's loop_end with a loop_start so hosts that
+            # bracket start/end see a well-formed stream even though no work ran.
+            await self._emit(LoopStartEvent())
+            await self._stop_for_consumption(consumption_reason)
+            return self.state
+
         user_msg = UserMessage(role="user", content=input_check.sanitized_content)
         append_message(self.state, user_msg)
         if self._context_manager and self._context_manager.options.capture_task and self.state.task is None:
@@ -452,6 +475,63 @@ class AgentRuntime:
     def _effective_max_iterations(self) -> int:
         return self._policy_store.get_policy().max_iterations
 
+    def _consumption_stop_reason(self) -> str | None:
+        """Return why the next LLM turn must be withheld, or ``None``.
+
+        Reads the *live* policy so a budget/halt change takes effect on the
+        next iteration without rebuilding the runtime. ``total_input_tokens``
+        and ``total_output_tokens`` are session-cumulative, so the ceiling is
+        not reset by ``run_prompt`` the way ``max_iterations`` is.
+        """
+        policy = self._policy_store.get_policy()
+        if policy.halt:
+            return "halted"
+        budget = policy.max_total_tokens
+        if budget is None:
+            return None
+        used = self.state.total_input_tokens + self.state.total_output_tokens
+        return "budget_exhausted" if used >= budget else None
+
+    async def _stop_for_consumption(self, reason: str) -> None:
+        """Audit + announce a consumption stop, then end the loop.
+
+        The durable audit entry is written on the *first* stop of the session
+        only (``self._consumption_stop_audited``): a client that keeps
+        re-prompting an exhausted/halted session would otherwise append one
+        record per refusal, unbounded. The event itself still fires on every
+        call so the host observes each refusal. The entry is written before the
+        event so a host reacting to the event can already query the record.
+        """
+        used = self.state.total_input_tokens + self.state.total_output_tokens
+        # Only reachable with a non-None policy budget, but another task could
+        # disable it between the check and this report; keep the field an int.
+        budget = self._policy_store.get_policy().max_total_tokens
+        reported_budget = budget if budget is not None else used
+
+        if not self._consumption_stop_audited:
+            self._consumption_stop_audited = True
+            if reason == "halted":
+                await self._audit_log.append(AuditEntry(
+                    timestamp=now_iso(),
+                    event="halted",
+                    actor="system",
+                    reason="runtime halt kill switch is active",
+                ))
+            else:
+                await self._audit_log.append(AuditEntry(
+                    timestamp=now_iso(),
+                    event="budget_exhausted",
+                    actor="system",
+                    reason=f"session token budget reached: {used} >= {reported_budget}",
+                    details={"tokens_used": used, "budget": reported_budget},
+                ))
+
+        if reason == "halted":
+            await self._emit(RuntimeHaltedEvent())
+        else:
+            await self._emit(BudgetExhaustedEvent(tokens_used=used, budget=reported_budget))
+        await self._finish_loop(reason)
+
     async def _run_loop(self) -> AgentState:
         try:
             await self._publish_pending_host_rejections()
@@ -548,6 +628,18 @@ class AgentRuntime:
                 continue
 
             # ── Normal path: a fresh LLM turn ────────────────────────────────
+            # Consumption guard runs only here, never mid tool-batch: a paused
+            # batch must be drained on resume or the assistant's tool_call
+            # declaration is left without matching tool results. Placing the
+            # check before the fresh turn is what bounds denial-of-wallet —
+            # one prompt fans out into many model calls, so ``max_iterations``
+            # alone does not cap spend.
+            consumption_reason = self._consumption_stop_reason()
+            if consumption_reason is not None:
+                self.state.signal = "stop"
+                await self._stop_for_consumption(consumption_reason)
+                break
+
             self.state.iteration += 1
             await self._emit(IterationStartEvent(iteration=self.state.iteration))
 
@@ -585,11 +677,35 @@ class AgentRuntime:
             turn = await self._llm.respond(copy.deepcopy(self.config), model_state)
             # Two-counter token accounting:
             #   - last_input_tokens: this turn's provider-reported prompt size.
-            #   - total_input_tokens: cumulative across the session, used only
-            #     for cost reporting. NEVER feed this into the budget check.
-            self.state.last_input_tokens = turn.usage.input_tokens if turn.usage else 0
-            self.state.total_input_tokens += (turn.usage.input_tokens if turn.usage else 0)
-            self.state.total_output_tokens += (turn.usage.output_tokens if turn.usage else 0)
+            #   - total_input_tokens: cumulative across the session.
+            # The cumulative totals feed the session consumption budget, so a
+            # turn's contribution is clamped at zero: a misreporting adapter
+            # must not be able to walk the running total backwards and keep the
+            # budget gate from ever firing.
+            usage = turn.usage
+            # A missing usage object and a present-but-zero one are treated
+            # alike: neither can advance the cumulative counter, so both leave
+            # the ceiling inert. A real turn always consumes tokens, so 0/0 is
+            # indistinguishable from "no accounting".
+            turn_input = usage.input_tokens if usage and usage.input_tokens is not None else 0
+            turn_output = usage.output_tokens if usage and usage.output_tokens is not None else 0
+            self.state.last_input_tokens = turn_input
+            self.state.total_input_tokens += max(0, turn_input)
+            self.state.total_output_tokens += max(0, turn_output)
+            # A budgeted session whose adapter reports no usable usage is
+            # silently unprotected. Surface that once so it is not invisible.
+            if turn_input <= 0 and turn_output <= 0 and not self._budget_usage_warned:
+                self._budget_usage_warned = True
+                if self._policy_store.get_policy().max_total_tokens is not None:
+                    await self._audit_log.append(AuditEntry(
+                        timestamp=now_iso(),
+                        event="budget_unenforceable",
+                        actor="system",
+                        reason=(
+                            "LLM adapter reported no token usage while a session token "
+                            "budget is set; the budget cannot be enforced"
+                        ),
+                    ))
 
             if turn.type == "text":
                 text = turn.text or ""

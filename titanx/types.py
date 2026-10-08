@@ -310,6 +310,27 @@ class LoopEndEvent:
 
 
 @dataclass
+class BudgetExhaustedEvent:
+    """The session token ceiling was reached; the next LLM turn was withheld.
+
+    Emitted immediately before the ``loop_end`` whose reason is
+    ``"budget_exhausted"``. ``tokens_used``/``budget`` let the host surface a
+    quota notice (or map tokens to money) without re-deriving the numbers.
+    """
+    tokens_used: int
+    budget: int
+    type: Literal["budget_exhausted"] = "budget_exhausted"
+
+
+@dataclass
+class RuntimeHaltedEvent:
+    """The ``AgentPolicy.halt`` kill switch is active, so the next LLM turn was
+    withheld. Emitted immediately before the ``loop_end`` with reason
+    ``"halted"``."""
+    type: Literal["halted"] = "halted"
+
+
+@dataclass
 class CompactionTriggeredEvent:
     summary: str
     ptl_attempts: int
@@ -390,6 +411,8 @@ RuntimeEvent = Union[
     ToolResultEvent,
     PendingApprovalEvent,
     LoopEndEvent,
+    BudgetExhaustedEvent,
+    RuntimeHaltedEvent,
     CompactionTriggeredEvent,
     CompactionFailedEvent,
     CompactionExhaustedEvent,
