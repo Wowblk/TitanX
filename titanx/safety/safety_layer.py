@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from typing import Callable, Sequence
+
 from .normalization import canonicalise_for_scan, strip_invisible_chars
 from .patterns import DEFAULT_INJECTION_PATTERNS, DEFAULT_PII_PATTERNS, InjectionPattern, PiiPattern
 from .redactor import PiiRedactor
 from .validator import InputValidator
 from ..types import SafetyLayerLike, SafetyResult, SafetyViolation, ToolOutputSafetyResult
+
+# A host-supplied scanner: given the Unicode-canonical view of some text,
+# return the violations it detected. Kept synchronous so a cascade adds no
+# concurrency to the (already async) runtime; a scanner that needs I/O
+# should do it out-of-band and expose a fast local check.
+InjectionScanner = Callable[[str], list[SafetyViolation]]
 
 
 # When a tool output triggers a block-level injection violation, we replace
@@ -24,14 +32,44 @@ class SafetyLayer(SafetyLayerLike):
         self,
         injection_patterns: list[InjectionPattern] | None = None,
         pii_patterns: list[PiiPattern] | None = None,
+        scanners: Sequence[InjectionScanner] | None = None,
     ) -> None:
         self._injection_patterns = injection_patterns or DEFAULT_INJECTION_PATTERNS
         self._validator = InputValidator(self._injection_patterns)
         self._redactor = PiiRedactor(pii_patterns or DEFAULT_PII_PATTERNS)
+        # Optional cascade of host-supplied detectors, run after the regex
+        # layer on the same canonical text. The regex layer stays the
+        # deterministic floor; scanners are additive depth.
+        self._scanners: tuple[InjectionScanner, ...] = tuple(scanners or ())
 
     @property
     def validator(self) -> InputValidator:
         return self._validator
+
+    def _run_scanners(self, canonical: str) -> list[SafetyViolation]:
+        """Run the host-supplied cascade against ``canonical`` text.
+
+        Scanners receive the *canonical* view (homoglyphs folded, invisibles
+        stripped) — the very bytes the regex layer scans — so a scanner
+        cannot be evaded by a Unicode trick the pattern layer would have
+        caught.
+
+        Fail-closed: a scanner that raises (or returns something that cannot
+        be iterated) contributes a ``scanner_error:<name>`` **block**
+        violation. A broken scanner must never silently become a bypass;
+        callers can distinguish infrastructure failure from detection by the
+        ``scanner_error:`` prefix.
+        """
+        found: list[SafetyViolation] = []
+        for scanner in self._scanners:
+            try:
+                found.extend(scanner(canonical))
+            except Exception:
+                name = getattr(scanner, "__name__", type(scanner).__name__)
+                found.append(
+                    SafetyViolation(pattern=f"scanner_error:{name}", action="block")
+                )
+        return found
 
     def check_input(self, content: str) -> SafetyResult:
         # Step 1 — injection scan on a *canonical* view of the raw input.
@@ -46,6 +84,10 @@ class SafetyLayer(SafetyLayerLike):
         for pattern in self._injection_patterns:
             if pattern.regex.search(canonical):
                 violations.append(SafetyViolation(pattern=pattern.name, action=pattern.action))
+
+        # Step 1b — the host-supplied scanner cascade, on the same canonical
+        # view, appended after the regex results.
+        violations.extend(self._run_scanners(canonical))
 
         # Step 2 — redact PII and return that as the sanitized payload. We
         # deliberately don't return the *canonicalised* form, because
@@ -113,6 +155,9 @@ class SafetyLayer(SafetyLayerLike):
         for pattern in self._injection_patterns:
             if pattern.regex.search(canonical):
                 violations.append(SafetyViolation(pattern=pattern.name, action=pattern.action))
+
+        # Host-supplied cascade — same canonical view, appended after regex.
+        violations.extend(self._run_scanners(canonical))
 
         blocked = any(v.action == "block" for v in violations)
         if blocked:
