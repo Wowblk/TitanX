@@ -201,6 +201,33 @@ def _validate_max_iterations(value: object) -> None:
         )
 
 
+def _validate_max_total_tokens(value: object) -> None:
+    """Session token ceiling: ``None`` (off) or a positive int.
+
+    Rejects ``bool`` (an ``int`` subclass) the same way ``max_iterations``
+    does, and enforces >= 1 so a typo'd ``0`` cannot silently mean "refuse
+    every turn". There is no upper ceiling: a large budget is legitimate.
+    """
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PolicyValidationError(
+            f"max_total_tokens must be int or None, got "
+            f"{type(value).__name__}: {value!r}"
+        )
+    if value < 1:
+        raise PolicyValidationError(
+            f"max_total_tokens must be >= 1, got {value}"
+        )
+
+
+def _validate_halt(value: object) -> None:
+    if not isinstance(value, bool):
+        raise PolicyValidationError(
+            f"halt must be bool, got {type(value).__name__}: {value!r}"
+        )
+
+
 # OCI digest format: ``algo:hex``. Only sha256 is in widespread use today
 # (sha512 is allowed by the OCI spec but virtually nobody publishes it);
 # we accept anything that looks like the canonical form so future-proofing
@@ -280,6 +307,10 @@ def validate_policy(policy: object) -> None:
         )
 
     _validate_max_iterations(policy.max_iterations)
+
+    _validate_max_total_tokens(getattr(policy, "max_total_tokens", None))
+
+    _validate_halt(getattr(policy, "halt", False))
 
 
 __all__ = ["PolicyValidationError", "validate_policy", "validate_write_path"]

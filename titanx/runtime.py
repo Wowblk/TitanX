@@ -26,6 +26,7 @@ from .types import (
     AssistantMessage,
     AssistantTextEvent,
     AssistantToolCallsEvent,
+    BudgetExhaustedEvent,
     CompactionBlockedEvent,
     CompactionExhaustedEvent,
     CompactionFailedEvent,
@@ -36,6 +37,7 @@ from .types import (
     LoopStartEvent,
     PendingApproval,
     RuntimeEvent,
+    RuntimeHaltedEvent,
     RuntimeHooks,
     SafetyLayerLike,
     ToolCall,
@@ -452,6 +454,54 @@ class AgentRuntime:
     def _effective_max_iterations(self) -> int:
         return self._policy_store.get_policy().max_iterations
 
+    def _consumption_stop_reason(self) -> str | None:
+        """Return why the next LLM turn must be withheld, or ``None``.
+
+        Reads the *live* policy so a budget/halt change takes effect on the
+        next iteration without rebuilding the runtime. ``total_input_tokens``
+        and ``total_output_tokens`` are session-cumulative, so the ceiling is
+        not reset by ``run_prompt`` the way ``max_iterations`` is.
+        """
+        policy = self._policy_store.get_policy()
+        if policy.halt:
+            return "halted"
+        budget = policy.max_total_tokens
+        if budget is None:
+            return None
+        used = self.state.total_input_tokens + self.state.total_output_tokens
+        return "budget_exhausted" if used >= budget else None
+
+    async def _stop_for_consumption(self, reason: str) -> None:
+        """Audit + announce a consumption stop, then end the loop.
+
+        The audit entry is written before the event so a host that reacts to
+        the event can already query the durable record.
+        """
+        used = self.state.total_input_tokens + self.state.total_output_tokens
+        if reason == "halted":
+            await self._audit_log.append(AuditEntry(
+                timestamp=now_iso(),
+                event="halted",
+                actor="system",
+                reason="runtime halt kill switch is active",
+            ))
+            await self._emit(RuntimeHaltedEvent())
+        else:
+            budget = self._policy_store.get_policy().max_total_tokens
+            if budget is None:
+                # Only reachable if another task disabled the budget between
+                # the check and this report; keep the field an int.
+                budget = used
+            await self._audit_log.append(AuditEntry(
+                timestamp=now_iso(),
+                event="budget_exhausted",
+                actor="system",
+                reason=f"session token budget reached: {used} >= {budget}",
+                details={"tokens_used": used, "budget": budget},
+            ))
+            await self._emit(BudgetExhaustedEvent(tokens_used=used, budget=budget))
+        await self._finish_loop(reason)
+
     async def _run_loop(self) -> AgentState:
         try:
             await self._publish_pending_host_rejections()
@@ -548,6 +598,18 @@ class AgentRuntime:
                 continue
 
             # ── Normal path: a fresh LLM turn ────────────────────────────────
+            # Consumption guard runs only here, never mid tool-batch: a paused
+            # batch must be drained on resume or the assistant's tool_call
+            # declaration is left without matching tool results. Placing the
+            # check before the fresh turn is what bounds denial-of-wallet —
+            # one prompt fans out into many model calls, so ``max_iterations``
+            # alone does not cap spend.
+            consumption_reason = self._consumption_stop_reason()
+            if consumption_reason is not None:
+                self.state.signal = "stop"
+                await self._stop_for_consumption(consumption_reason)
+                break
+
             self.state.iteration += 1
             await self._emit(IterationStartEvent(iteration=self.state.iteration))
 
