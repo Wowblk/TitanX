@@ -1,10 +1,31 @@
 from __future__ import annotations
 
+from typing import Callable, Sequence
+
 from .normalization import canonicalise_for_scan, strip_invisible_chars
 from .patterns import DEFAULT_INJECTION_PATTERNS, DEFAULT_PII_PATTERNS, InjectionPattern, PiiPattern
 from .redactor import PiiRedactor
 from .validator import InputValidator
 from ..types import SafetyLayerLike, SafetyResult, SafetyViolation, ToolOutputSafetyResult
+
+# A host-supplied scanner: given the Unicode-canonical view of some text,
+# return the violations it detected. Kept synchronous so a cascade adds no
+# concurrency to the (already async) runtime; a scanner that needs I/O
+# should do it out-of-band and expose a fast local check.
+#
+# Notes for implementers:
+#   * Only ``action="block"`` is authoritative at these seams. ``warn`` /
+#     ``sanitize`` / ``review`` violations are recorded for the host to
+#     observe but neither block nor rewrite content (content rewriting is the
+#     PII redactor's job, not a scanner's).
+#   * Scanners run on the *pre-redaction* canonical view, so a remote /
+#     third-party scanner will see raw PII and secrets. Keep remote scanners
+#     to data you are willing to egress; use a local scanner otherwise.
+#   * The cascade covers the two text-in seams (``check_input`` and
+#     ``inspect_tool_output``). Tool-call *arguments* remain regex-only via
+#     ``InputValidator.validate_tool_params`` — they are model-generated, not
+#     the untrusted-document surface this cascade defends.
+InjectionScanner = Callable[[str], list[SafetyViolation]]
 
 
 # When a tool output triggers a block-level injection violation, we replace
@@ -24,14 +45,53 @@ class SafetyLayer(SafetyLayerLike):
         self,
         injection_patterns: list[InjectionPattern] | None = None,
         pii_patterns: list[PiiPattern] | None = None,
+        scanners: Sequence[InjectionScanner] | None = None,
     ) -> None:
         self._injection_patterns = injection_patterns or DEFAULT_INJECTION_PATTERNS
         self._validator = InputValidator(self._injection_patterns)
         self._redactor = PiiRedactor(pii_patterns or DEFAULT_PII_PATTERNS)
+        # Optional cascade of host-supplied detectors, run after the regex
+        # layer on the same canonical text. The regex layer stays the
+        # deterministic floor; scanners are additive depth.
+        self._scanners: tuple[InjectionScanner, ...] = tuple(scanners or ())
 
     @property
     def validator(self) -> InputValidator:
         return self._validator
+
+    def _run_scanners(self, canonical: str) -> list[SafetyViolation]:
+        """Run the host-supplied cascade against ``canonical`` text.
+
+        Scanners receive the *canonical* view (homoglyphs folded, invisibles
+        stripped) — the very bytes the regex layer scans — so a scanner
+        cannot be evaded by a Unicode trick the pattern layer would have
+        caught.
+
+        Fail-closed: a scanner that raises, or whose return value cannot be
+        interpreted as a list of ``SafetyViolation``, contributes a
+        ``scanner_error:<name>`` **block** violation. A broken scanner must
+        never silently become a bypass; callers can distinguish
+        infrastructure failure from detection by the ``scanner_error:`` prefix.
+        """
+        found: list[SafetyViolation] = []
+        for scanner in self._scanners:
+            try:
+                # Materialise the whole result before trusting any of it: a
+                # generator that yields then raises must not leak its partial
+                # output as if the scan had succeeded. The element check
+                # catches the easy authoring bug of returning strings/labels,
+                # which ``list.extend`` would otherwise accept silently.
+                produced = list(scanner(canonical))
+                if not all(isinstance(v, SafetyViolation) for v in produced):
+                    raise TypeError("scanner must return SafetyViolation items")
+            except Exception:
+                name = getattr(scanner, "__name__", type(scanner).__name__)
+                found.append(
+                    SafetyViolation(pattern=f"scanner_error:{name}", action="block")
+                )
+                continue
+            found.extend(produced)
+        return found
 
     def check_input(self, content: str) -> SafetyResult:
         # Step 1 — injection scan on a *canonical* view of the raw input.
@@ -46,6 +106,10 @@ class SafetyLayer(SafetyLayerLike):
         for pattern in self._injection_patterns:
             if pattern.regex.search(canonical):
                 violations.append(SafetyViolation(pattern=pattern.name, action=pattern.action))
+
+        # Step 1b — the host-supplied scanner cascade, on the same canonical
+        # view, appended after the regex results.
+        violations.extend(self._run_scanners(canonical))
 
         # Step 2 — redact PII and return that as the sanitized payload. We
         # deliberately don't return the *canonicalised* form, because
@@ -113,6 +177,9 @@ class SafetyLayer(SafetyLayerLike):
         for pattern in self._injection_patterns:
             if pattern.regex.search(canonical):
                 violations.append(SafetyViolation(pattern=pattern.name, action=pattern.action))
+
+        # Host-supplied cascade — same canonical view, appended after regex.
+        violations.extend(self._run_scanners(canonical))
 
         blocked = any(v.action == "block" for v in violations)
         if blocked:
