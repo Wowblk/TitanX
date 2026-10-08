@@ -12,6 +12,19 @@ from ..types import SafetyLayerLike, SafetyResult, SafetyViolation, ToolOutputSa
 # return the violations it detected. Kept synchronous so a cascade adds no
 # concurrency to the (already async) runtime; a scanner that needs I/O
 # should do it out-of-band and expose a fast local check.
+#
+# Notes for implementers:
+#   * Only ``action="block"`` is authoritative at these seams. ``warn`` /
+#     ``sanitize`` / ``review`` violations are recorded for the host to
+#     observe but neither block nor rewrite content (content rewriting is the
+#     PII redactor's job, not a scanner's).
+#   * Scanners run on the *pre-redaction* canonical view, so a remote /
+#     third-party scanner will see raw PII and secrets. Keep remote scanners
+#     to data you are willing to egress; use a local scanner otherwise.
+#   * The cascade covers the two text-in seams (``check_input`` and
+#     ``inspect_tool_output``). Tool-call *arguments* remain regex-only via
+#     ``InputValidator.validate_tool_params`` — they are model-generated, not
+#     the untrusted-document surface this cascade defends.
 InjectionScanner = Callable[[str], list[SafetyViolation]]
 
 
@@ -54,21 +67,30 @@ class SafetyLayer(SafetyLayerLike):
         cannot be evaded by a Unicode trick the pattern layer would have
         caught.
 
-        Fail-closed: a scanner that raises (or returns something that cannot
-        be iterated) contributes a ``scanner_error:<name>`` **block**
-        violation. A broken scanner must never silently become a bypass;
-        callers can distinguish infrastructure failure from detection by the
-        ``scanner_error:`` prefix.
+        Fail-closed: a scanner that raises, or whose return value cannot be
+        interpreted as a list of ``SafetyViolation``, contributes a
+        ``scanner_error:<name>`` **block** violation. A broken scanner must
+        never silently become a bypass; callers can distinguish
+        infrastructure failure from detection by the ``scanner_error:`` prefix.
         """
         found: list[SafetyViolation] = []
         for scanner in self._scanners:
             try:
-                found.extend(scanner(canonical))
+                # Materialise the whole result before trusting any of it: a
+                # generator that yields then raises must not leak its partial
+                # output as if the scan had succeeded. The element check
+                # catches the easy authoring bug of returning strings/labels,
+                # which ``list.extend`` would otherwise accept silently.
+                produced = list(scanner(canonical))
+                if not all(isinstance(v, SafetyViolation) for v in produced):
+                    raise TypeError("scanner must return SafetyViolation items")
             except Exception:
                 name = getattr(scanner, "__name__", type(scanner).__name__)
                 found.append(
                     SafetyViolation(pattern=f"scanner_error:{name}", action="block")
                 )
+                continue
+            found.extend(produced)
         return found
 
     def check_input(self, content: str) -> SafetyResult:

@@ -27,7 +27,9 @@ from __future__ import annotations
 import pytest
 
 from titanx.safety.safety_layer import SafetyLayer
-from titanx.types import SafetyViolation
+from titanx.types import LlmTurnResult, SafetyViolation
+
+from ._helpers import ScriptedLlm, make_runtime
 
 
 def _scanner(*specs: tuple[str, str]):
@@ -121,7 +123,55 @@ def test_scanner_returning_unusable_value_fails_closed_on_input():
     result = layer.check_input("hello")
 
     assert result.safe is False
-    assert [v.action for v in result.violations] == ["block"]
+    assert result.violations == [
+        SafetyViolation(pattern="scanner_error:scan", action="block")
+    ]
+
+
+def test_scanner_returning_list_of_non_violations_fails_closed_on_input():
+    # The authoring bug that `list.extend` alone does not catch: an iterable
+    # that yields non-SafetyViolation objects. It must still fail closed as a
+    # scanner_error block, not surface as an AttributeError from the consumer.
+    def scan(_text: str):
+        return ["not-a-violation"]
+
+    layer = SafetyLayer(scanners=[scan])
+
+    result = layer.check_input("hello")
+
+    assert result.safe is False
+    assert result.violations == [
+        SafetyViolation(pattern="scanner_error:scan", action="block")
+    ]
+
+
+def test_scanner_that_yields_then_raises_contributes_only_the_error_block():
+    # A generator that yields some items before failing must not leak the
+    # partial results as if the scan had succeeded.
+    def scan(_text: str):
+        yield SafetyViolation(pattern="partial", action="warn")
+        raise RuntimeError("backend died mid-stream")
+
+    layer = SafetyLayer(scanners=[scan])
+
+    result = layer.check_input("hello")
+
+    assert result.violations == [
+        SafetyViolation(pattern="scanner_error:scan", action="block")
+    ]
+
+
+@pytest.mark.parametrize("action", ["warn", "sanitize", "review"])
+def test_scanner_non_block_actions_are_recorded_but_do_not_block(action):
+    # Only ``block`` is authoritative at this seam. The other actions are
+    # recorded so a host can observe them, but they neither block nor rewrite
+    # content (content rewriting is the PII redactor's job, not a scanner's).
+    layer = SafetyLayer(scanners=[_scanner(("custom", action))])
+
+    result = layer.check_input("hello")
+
+    assert result.safe is True
+    assert [v.pattern for v in result.violations] == ["custom"]
 
 
 # ── inspect_tool_output seam ────────────────────────────────────────────────
@@ -212,3 +262,16 @@ def test_scanner_name_used_in_error_defaults_for_callables():
     assert result.safe is False
     assert result.violations[0].pattern.startswith("scanner_error:")
     assert result.violations[0].action == "block"
+
+
+# ── end-to-end: the block reaches the runtime seam ──────────────────────────
+
+
+async def test_scanner_block_blocks_the_prompt_through_the_runtime():
+    # The layer is only useful if a scanner block actually stops the prompt
+    # at the runtime boundary — not just in a unit call.
+    layer = SafetyLayer(scanners=[_scanner(("evil_scanner", "block"))])
+    runtime = make_runtime(ScriptedLlm([]), safety=layer)
+
+    with pytest.raises(ValueError, match="evil_scanner"):
+        await runtime.run_prompt("hello")
