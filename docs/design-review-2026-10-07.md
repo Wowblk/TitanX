@@ -4,6 +4,11 @@
 范围：`titanx/` 全部模块（~15k 行），含 runtime、context、policy、mcp、gateway、factory 及 `docs/` 下的设计文档。
 方法：静态阅读代码 + 交叉核对文档，未运行、未改动任何代码。所有结论均带 `file:line`。
 
+> **处理状态（2026-10-07 更新）：已全部闭合。** 本评审编号问题 #1–#16 与各非编号小节
+> （§1.6 / §2.1 / §2.3 / §3.1 / §3.2 / §5.3 / §5.4）均已修复，逐条对应的落地 PR 见文末
+> 「优先级汇总」表的「状态」列；实现细节见 `CHANGELOG.md`。下表 `file:line` 为评审当时
+> 的快照坐标，修复后行号已变动，仅作定位参考。
+
 ---
 
 ## 0. 一句话总结
@@ -135,24 +140,33 @@
 
 ## 优先级汇总
 
-| # | 级别 | 问题 | 位置 |
-|---|---|---|---|
-| 1 | Critical | 默认工厂 sandbox 与 runtime 的 PolicyStore 不共享 → 路径检查与挂载传播双双静默失效 | `factory.py:160-177`, `runtime.py:103-110`, `tool_runtime.py:51-70`, `docker.py:151` |
-| 2 | High | 审计决策/调用记录缺 identity/session 与工具契约摘要，违反 TXS-11 | `execution.py:320-330`, `runtime.py:1239-1262` |
-| 3 | High | MCP admission 与 PolicyStore/ExecutionGuard 完全分离，无共享 epoch/快照/决策记录 | `mcp/admission.py` vs `policy/policy_store.py` |
-| 4 | High | 已注册的非审批工具默认放行（非默认拒绝） | `policy_store.py:106-109` |
-| 5 | High | transcript 无单一 owner，manager 与 compactor 各自重写 | `manager.py:105-108`, `compactor.py:221` |
-| 6 | High | 无 teardown 契约：驱逐不销毁 sandbox session；`delete_session` 无人调用 → 磁盘泄漏 | `session_registry.py:141-163`, `application.py:58`, `store.py:170` |
-| 7 | High | `reserved_output_tokens` 静默改写 `config.max_output_tokens` | `runtime.py:85-86` |
-| 8 | Medium | `McpAdmissionRuntime.list_tools()` 在 `discover()` 前为空 → 先建 runtime 会让 MCP 工具永久 `unknown_tool` 且无报错 | `admission.py:391-400`, `runtime.py:67,113` |
-| 9 | Medium | 单写锁 + 取消泄漏 + `close()` 竞态 | `store.py:96-100,176-180` |
-| 10 | Medium | PTL 用字节而非配置的 tokenizer 选牺牲组 | `compactor.py:62` |
-| 11 | Medium | 鉴权 `_check_api_key` 两处语义相反；`require_api_key` 死代码 | `server.py:38,51`, `chat.py:42` |
-| 12 | Medium | 入口/CLI 碎片：5 个 shim + 独立审计 CLI；网关多路由恒 501 | `application.py:77-102`, `cli.py:253` |
-| 13 | Medium | 第二审计表 `StorageBackend.save_log` 仍在公开 API | `storage/types.py:72` |
-| 14 | Low | `BreakGlassController.dispose()` 公开 foot-gun（取消计时不回滚） | `break_glass.py:156-169` |
-| 15 | Low | 死代码：`_effective_auto_approve`/`wait_for_approval`/`require_api_key`/`server.run_gateway` | 见 3.3 |
-| 16 | Low | 文档与实现多处漂移 | 见第 6 节 |
+| # | 级别 | 问题 | 位置 | 状态 |
+|---|---|---|---|---|
+| 1 | Critical | 默认工厂 sandbox 与 runtime 的 PolicyStore 不共享 → 路径检查与挂载传播双双静默失效 | `factory.py:160-177`, `runtime.py:103-110`, `tool_runtime.py:51-70`, `docker.py:151` | ✅ PR #4 |
+| 2 | High | 审计决策/调用记录缺 identity/session 与工具契约摘要，违反 TXS-11 | `execution.py:320-330`, `runtime.py:1239-1262` | ✅ PR #3 |
+| 3 | High | MCP admission 与 PolicyStore/ExecutionGuard 完全分离，无共享 epoch/快照/决策记录 | `mcp/admission.py` vs `policy/policy_store.py` | ✅ PR #4 |
+| 4 | High | 已注册的非审批工具默认放行（非默认拒绝） | `policy_store.py:106-109` | ✅ PR #4 |
+| 5 | High | transcript 无单一 owner，manager 与 compactor 各自重写 | `manager.py:105-108`, `compactor.py:221` | ✅ PR #4 |
+| 6 | High | 无 teardown 契约：驱逐不销毁 sandbox session；`delete_session` 无人调用 → 磁盘泄漏 | `session_registry.py:141-163`, `application.py:58`, `store.py:170` | ✅ PR #4 |
+| 7 | High | `reserved_output_tokens` 静默改写 `config.max_output_tokens` | `runtime.py:85-86` | ✅ PR #4 |
+| 8 | Medium | `McpAdmissionRuntime.list_tools()` 在 `discover()` 前为空 → 先建 runtime 会让 MCP 工具永久 `unknown_tool` 且无报错 | `admission.py:391-400`, `runtime.py:67,113` | ✅ PR #5 |
+| 9 | Medium | 单写锁 + 取消泄漏 + `close()` 竞态 | `store.py:96-100,176-180` | ✅ PR #5 |
+| 10 | Medium | PTL 用字节而非配置的 tokenizer 选牺牲组 | `compactor.py:62` | ✅ PR #5 |
+| 11 | Medium | 鉴权 `_check_api_key` 两处语义相反；`require_api_key` 死代码 | `server.py:38,51`, `chat.py:42` | ✅ PR #5 |
+| 12 | Medium | 入口/CLI 碎片：5 个 shim + 独立审计 CLI；网关多路由恒 501 | `application.py:77-102`, `cli.py:253` | ✅ PR #5 |
+| 13 | Medium | 第二审计表 `StorageBackend.save_log` 仍在公开 API | `storage/types.py:72` | ✅ PR #5 |
+| 14 | Low | `BreakGlassController.dispose()` 公开 foot-gun（取消计时不回滚） | `break_glass.py:156-169` | ✅ PR #5 |
+| 15 | Low | 死代码：`_effective_auto_approve`/`wait_for_approval`/`require_api_key`/`server.run_gateway` | 见 3.3 | ✅ PR #5 |
+| 16 | Low | 文档与实现多处漂移 | 见第 6 节 | ✅ PR #5 |
+
+**不在上表的条目：**
+
+- **§3.1**（`AgentRuntime` god-class）与 **§3.2**（隐藏状态机）为结构性债，由 **PR #8** 闭合：
+  工具管线提取为 `ToolCallPipeline`，恢复状态集中为 `ContextRecovery`（零行为变更重构）。
+  §3.1 提取后经变异测试发现的覆盖缺口由 **PR #9** 补测。
+- 非编号小节：**§5.4 / §1.6** 由 **PR #6** 闭合；**§2.3 / §5.3**（以及 §1.6 剩余项）由
+  **PR #7** 闭合；**§2.1** 除表中 #5 外，摘要身份定义、任务持久化、`session_id` 来源等
+  相关子项随 PR #4 / PR #7 一并收口。
 
 ---
 
