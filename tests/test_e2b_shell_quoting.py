@@ -42,7 +42,14 @@ class _RecordingCommands:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str | None]] = []
 
-    async def run(self, cmd: str, *, timeout: float = 60, cwd: str | None = None):
+    async def run(
+        self,
+        cmd: str,
+        *,
+        timeout: float = 60,
+        cwd: str | None = None,
+        envs: dict[str, str] | None = None,
+    ):
         self.calls.append((cmd, cwd))
         return types.SimpleNamespace(exit_code=0, stdout="ok", stderr="")
 
