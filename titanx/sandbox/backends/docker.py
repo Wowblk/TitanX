@@ -415,10 +415,15 @@ class DockerSandboxBackend(SandboxBackend):
         if not session:
             raise ValueError("write_files requires a session for Docker backend")
         for f in files:
-            escaped = f.content.replace("'", "'\\''")
+            # ``f.path`` (and the content) are host-supplied strings handed to a
+            # ``sh -c`` script. Both are shell-quoted — an unquoted path with a
+            # single quote would break out of the string and run as a second
+            # command inside the container. Same rule as ``_build_shell_command``.
+            quoted_path = _quote(f.path)
             cmd = [
                 self._opts.docker_bin, "exec", session.id,
-                "sh", "-c", f"mkdir -p $(dirname '{f.path}') && printf '%s' '{escaped}' > '{f.path}'",
+                "sh", "-c",
+                f"mkdir -p $(dirname {quoted_path}) && printf '%s' {_quote(f.content)} > {quoted_path}",
             ]
             await _run_process(cmd)
 
