@@ -28,7 +28,7 @@ from titanx.sandbox.backends.microsandbox import (
     MicrosandboxSandboxBackend,
     MicrosandboxSandboxBackendOptions,
 )
-from titanx.sandbox.types import SandboxExecutionRequest
+from titanx.sandbox.types import SandboxExecutionRequest, SandboxSession
 
 
 class _RecordingSandbox:
@@ -79,10 +79,19 @@ class _Stdin:
         return ("stdin-bytes", data)
 
 
+class _Network:
+    """Stand-in for ``microsandbox.Network``."""
+
+    @staticmethod
+    def none() -> str:
+        return "network-none"
+
+
 def _install_fake_microsandbox(monkeypatch) -> None:
     module = types.ModuleType("microsandbox")
     module.Sandbox = _FakeSandboxFactory  # type: ignore[attr-defined]
     module.Stdin = _Stdin  # type: ignore[attr-defined]
+    module.Network = _Network  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "microsandbox", module)
     _RecordingSandbox.last = None
     _Stdin.last = None
@@ -198,8 +207,35 @@ async def test_capabilities_advertise_strong_isolation_and_browser(monkeypatch):
     assert caps.kind == "microsandbox"
     assert caps.supports_strong_isolation is True
     assert caps.supports_browser is True
-    assert caps.supports_network is True
     assert caps.supports_package_install is True
+
+
+async def test_network_is_disabled_by_default(monkeypatch):
+    # The SDK default reaches the public internet; a security-first backend
+    # must not inherit that silently. Default is no network, and the capability
+    # declaration must say so.
+    _install_fake_microsandbox(monkeypatch)
+    backend = _backend()
+
+    await backend.execute(SandboxExecutionRequest(command="echo", args=["hi"]))
+
+    assert _FakeSandboxFactory.last_create_kwargs["network"] == "network-none"
+    assert backend.capabilities().supports_network is False
+    assert "network" not in backend.capabilities().supported_capabilities
+
+
+async def test_network_can_be_enabled(monkeypatch):
+    _install_fake_microsandbox(monkeypatch)
+    backend = MicrosandboxSandboxBackend(
+        MicrosandboxSandboxBackendOptions(available=True, image="python", network_enabled=True)
+    )
+
+    await backend.execute(SandboxExecutionRequest(command="echo", args=["hi"]))
+
+    # Enabled = SDK default egress (public reachable, private/metadata blocked).
+    assert "network" not in _FakeSandboxFactory.last_create_kwargs
+    assert backend.capabilities().supports_network is True
+    assert "network" in backend.capabilities().supported_capabilities
 
 
 async def test_is_available_is_true_with_sdk_and_image(monkeypatch):
@@ -218,3 +254,45 @@ async def test_is_available_is_false_without_a_configured_image(monkeypatch):
         MicrosandboxSandboxBackendOptions(available=True)
     )
     assert await backend.is_available() is False
+
+
+async def test_create_session_disables_network_by_default(monkeypatch):
+    _install_fake_microsandbox(monkeypatch)
+
+    await _backend().create_session()
+
+    assert _FakeSandboxFactory.last_create_kwargs["network"] == "network-none"
+
+
+async def test_session_execute_boots_with_network_disabled(monkeypatch):
+    # The session (detached) boot path must carry the same network policy as the
+    # session-less default; a session that silently inherited the SDK's
+    # public-internet default would break the capability declaration.
+    _install_fake_microsandbox(monkeypatch)
+    session = SandboxSession(id="sess-1", backend="microsandbox")
+
+    await _backend().execute(
+        SandboxExecutionRequest(command="echo", args=["hi"]), session=session
+    )
+
+    assert _FakeSandboxFactory.last_create_kwargs["network"] == "network-none"
+
+
+async def test_resume_boots_from_snapshot_and_re_applies_network_policy(monkeypatch):
+    # The SDK restores by booting with ``snapshot=`` (there is no
+    # ``Sandbox.restore``); image and snapshot are mutually exclusive, and the
+    # network policy must be re-applied or the restored microVM would inherit
+    # the SDK's public-internet default.
+    _install_fake_microsandbox(monkeypatch)
+
+    session = await _backend().resume("snap-123")
+
+    kwargs = _FakeSandboxFactory.last_create_kwargs
+    assert kwargs["snapshot"] == "snap-123"
+    assert "image" not in kwargs
+    assert kwargs["network"] == "network-none"
+    # Fresh name (not the snapshot id) and detached, so the restored microVM
+    # survives the creating call.
+    assert kwargs["name"] != "snap-123"
+    assert kwargs["detached"] is True
+    assert session.id == "snap-123"

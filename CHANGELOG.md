@@ -169,6 +169,22 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Fixed
 
+- **Sandbox network capability now reflects the configured network** — a
+  backend's `supports_network` declaration must match what it will actually
+  launch, or the router starts a `needs_network` workload that can reach
+  nothing. `DockerSandboxBackend` defaulted to `network="none"` yet advertised
+  `supports_network=True`; it now derives the flag from the option
+  (`network != "none"`), advertising the `"network"` capability only when
+  enabled. `MicrosandboxSandboxBackend` now defaults to **no network** (the
+  `microsandbox` SDK default reaches the public internet) by passing
+  `Network.none()` explicitly, with an opt-in `network_enabled` option; its
+  `supports_network`/`"network"` declaration follows the same flag. Docker
+  backends left at the default `network="none"` now correctly fail a
+  `needs_network` request closed instead of routing it onto a networkless
+  container. `MicrosandboxSandboxBackend.resume()` was also corrected: it now
+  boots from the snapshot via `Sandbox.create(snapshot=...)` (the SDK exposes no
+  `Sandbox.restore`) and re-applies the network policy, so a restored microVM
+  cannot silently inherit the SDK's public-internet default.
 - **One source of truth for the MCP contract fingerprint** — the discovery
   path's pin check rebuilt the contract dict inline and hashed it separately from
   the public `tool_contract_fingerprint`, so the two could drift and reject a
@@ -239,6 +255,11 @@ always be flagged in the **Changed** / **Removed** sections.
   SDK's `env=`, stdin rides `Stdin.bytes`, `cwd`/`timeout` ride SDK parameters,
   and the backend advertises strong isolation. A fake `microsandbox` module is
   injected at `sys.modules`, so no real microVM (and no KVM host) is needed.
+- `tests/test_sandbox_network_capability.py` pins a backend's network
+  declaration to its configured network: Docker advertises no network (and the
+  router refuses `needs_network`) when left at `network="none"`, and advertises
+  it when enabled. `tests/test_microsandbox_backend.py` additionally covers the
+  microVM tier's no-network default (`Network.none()`) and opt-in enable.
 - `tests/test_tool_pipeline_coverage.py` closes mutation-testing survivors left
   on the §3.1 tool-pipeline extraction: it asserts PII redaction is gated by
   `ToolDefinition.requires_sanitization`, that a tool called exactly once per
