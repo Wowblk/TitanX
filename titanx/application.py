@@ -408,8 +408,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         epilog=(
             "退出状态：0 仅表示本次运行以最终文本回答结束（loop_end reason=\"completed\"），"
             "不代表任务目标已被核验达成；非 0 表示循环被停止（halted / budget_exhausted / "
-            "max_iterations 等）、上下文无法容纳，或发生错误。运行时从不评估 "
-            "acceptance_criteria——此类“完成”会在审计日志写入一条 completion_unverified。"
+            "max_iterations 等）、暂停等待审批（pending_approval）、上下文无法容纳，或发生错误。"
+            "运行时从不评估 acceptance_criteria：声明了验收标准的任务完成时，仅由宿主一侧的"
+            "审计日志记录一条 completion_unverified。本 CLI 既不声明验收标准，也不展示审计日志，"
+            "因此实际核验须由宿主完成。"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
