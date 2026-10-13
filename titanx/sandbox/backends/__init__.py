@@ -1,6 +1,6 @@
 from .wasm import WasmSandboxBackend, WasmCommandRegistration
 from .docker import DockerSandboxBackend, DockerSandboxBackendOptions
-from .e2b import E2BSandboxBackend, E2BSandboxBackendOptions
+from .microsandbox import MicrosandboxSandboxBackend, MicrosandboxSandboxBackendOptions
 from .sidecar import (
     SIDECAR_PROTOCOL_VERSION,
     SidecarCommandRegistration,
@@ -18,7 +18,7 @@ from .sidecar import (
 __all__ = [
     "WasmSandboxBackend", "WasmCommandRegistration",
     "DockerSandboxBackend", "DockerSandboxBackendOptions",
-    "E2BSandboxBackend", "E2BSandboxBackendOptions",
+    "MicrosandboxSandboxBackend", "MicrosandboxSandboxBackendOptions",
     "SIDECAR_PROTOCOL_VERSION",
     "SidecarCommandRegistration",
     "SidecarError",

@@ -36,11 +36,11 @@
 默认参数是失败阈值 5、窗口 60 秒、冷却 60 秒、恢复成功阈值 2、最多尝试
 3 次。复现中改用失败阈值 1、最多尝试 1 次，以排除重试等待和累计次数干扰。
 
-**异常与退出码的区别：** 当前 Docker/E2B 的不少执行异常会被转换成
+**异常与退出码的区别：** 当前 Docker/microsandbox 的不少执行异常会被转换成
 `SandboxExecutionResult(exit_code != 0)`。熔断器只根据抛出的异常记录失败，
-不会自动把非零退出码算成异常。因此，不能声称任意 Docker/E2B 故障都会
+不会自动把非零退出码算成异常。因此，不能声称任意 Docker/microsandbox 故障都会
 触发这个问题。本次模拟后端明确抛出 `RuntimeError`，验证的是满足上述
-条件后的路由与状态机缺陷，不是真实 Docker/E2B 故障实验。
+条件后的路由与状态机缺陷，不是真实 Docker/microsandbox 故障实验。
 
 ## 旧代码的调用链与根因
 
@@ -89,7 +89,7 @@ selection.backend.execute()
 首次观察到的输出：
 
 ```text
-RECOVERY_THROUGH_ROUTER: No sandbox backend is available for the requested execution profile (min_isolation='docker'; rejected: docker: is_available=False; e2b: backend not registered)
+RECOVERY_THROUGH_ROUTER: No sandbox backend is available for the requested execution profile (min_isolation='docker'; rejected: docker: is_available=False; microsandbox: backend not registered)
 RECOVERY_BY_DIRECT_EXECUTE: closed
 ```
 
@@ -117,7 +117,7 @@ cd /Users/wowblk/TitanX/TitanX
    依次为 `closed → open → half-open → closed`。
 
 测试只替换 `circuit_breaker` 模块引用的时钟，不修改 `asyncio` 的真实计时。
-无需 Docker、E2B、网络、模型密钥或实际等待 60 秒。
+无需 Docker、microsandbox、网络、模型密钥或实际等待 60 秒。
 
 修改生产代码前，新测试文件实际结果为 **7 failed, 1 passed**。主回归在
 第 4 步失败，错误就是上面的 `docker: is_available=False`。其余失败包括
@@ -194,7 +194,7 @@ git diff --check
 
 编译检查通过；示例输出为 `Final response: Echo: Hello, TitanX!`；补丁空白
 检查通过。50 项是本次相关测试集合，不是全仓库测试数量。示例使用仓库的
-Echo 模型适配器，不能作为真实模型或真实 Docker/E2B 集成测试的证据。
+Echo 模型适配器，不能作为真实模型或真实 Docker/microsandbox 集成测试的证据。
 
 新回归用例明细（同属 `tests/test_resilient_backend_recovery.py`）：
 

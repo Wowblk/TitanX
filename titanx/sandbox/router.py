@@ -4,7 +4,7 @@ Selects a ``SandboxBackend`` for a given workload's risk profile. The
 historical implementation silently fell back to a lower-isolation
 backend whenever the preferred one was unavailable — a workload
 flagged ``risk_level="high"`` could end up on the WASI sandbox during
-a Docker / E2B outage with zero observability.
+a Docker / microsandbox outage with zero observability.
 
 Hardenings (Q18):
 
@@ -32,13 +32,15 @@ from .types import (
 )
 
 
-# Higher number = stronger isolation. Used to enforce ``min_isolation``.
-# WASI < Docker < E2B is the project's default ordering; if you swap
-# in a stronger WASI runtime, override this map at construction time.
+# Higher number = stronger isolation. Used to enforce ``min_isolation``
+# and to build the candidate order. WASI < Docker < microVM is the
+# project's default ordering; if you swap in a different runtime, override
+# this map at construction time (the router never hard-codes kind names
+# beyond this table).
 _DEFAULT_ISOLATION_RANK: dict[SandboxKind, int] = {
     "wasm": 1,
     "docker": 2,
-    "e2b": 3,
+    "microsandbox": 3,
 }
 
 
@@ -90,7 +92,7 @@ class SandboxRouter:
             except Exception as exc:
                 rejected.append((kind, f"capability probe raised: {exc!r}"))
                 continue
-            mismatch = self._capability_mismatch(kind, capabilities, request)
+            mismatch = self._capability_mismatch(capabilities, request)
             if mismatch is not None:
                 rejected.append((kind, mismatch))
                 continue
@@ -121,7 +123,6 @@ class SandboxRouter:
 
     @staticmethod
     def _capability_mismatch(
-        kind: SandboxKind,
         capabilities: SandboxBackendCapabilities,
         request: SandboxRouterInput,
     ) -> str | None:
@@ -130,11 +131,12 @@ class SandboxRouter:
         Candidate ranking is only a preference order.  It must never be used
         as proof that a backend actually implements the requested capability:
         the historical router ranked Docker/WASM as fallbacks for browser or
-        remote workloads even though their capability descriptors explicitly
-        said otherwise.
+        strong-isolation workloads even though their capability descriptors
+        explicitly said otherwise. Strong isolation is checked against the
+        capability flag, never a concrete backend kind.
         """
-        if request.requires_remote_isolation and kind != "e2b":
-            return "does not provide required remote isolation"
+        if request.requires_strong_isolation and not capabilities.supports_strong_isolation:
+            return "does not provide required strong isolation"
         if request.needs_browser and not capabilities.supports_browser:
             return "supports_browser=False"
         if request.needs_network and not capabilities.supports_network:
@@ -170,23 +172,47 @@ class SandboxRouter:
                 *self._fallbacks_excluding(inp.preferred_backend),
             ]
 
-        if inp.requires_remote_isolation or inp.risk_level == "high" or inp.needs_browser:
-            return [
-                {"kind": "e2b", "reason": "remote isolation selected for high-risk or browser workload"},
-                {"kind": "docker", "reason": "docker fallback for isolated system workload"},
-                {"kind": "wasm", "reason": "wasm fallback when stronger backends are unavailable"},
-            ]
+        if inp.requires_strong_isolation or inp.risk_level == "high" or inp.needs_browser:
+            return self._candidate_order(
+                self._strongest_kind(),
+                "strong isolation selected for high-risk or browser workload",
+            )
 
         if inp.needs_filesystem or inp.needs_network or inp.needs_package_install or inp.risk_level == "medium":
-            return [
-                {"kind": "docker", "reason": "docker selected for filesystem, network, or package workload"},
-                {"kind": "e2b", "reason": "e2b fallback for remotely isolated system workload"},
-                {"kind": "wasm", "reason": "wasm fallback for reduced-capability execution"},
-            ]
+            return self._candidate_order(
+                "docker",
+                "docker selected for filesystem, network, or package workload",
+            )
 
         return [
             {"kind": self._default_backend, "reason": "default lightweight sandbox selected"},
             *self._fallbacks_excluding(self._default_backend),
+        ]
+
+    def _kinds_by_rank_desc(self) -> list[SandboxKind]:
+        return sorted(
+            self._isolation_rank,
+            key=lambda k: self._isolation_rank[k],
+            reverse=True,
+        )
+
+    def _strongest_kind(self) -> SandboxKind:
+        return self._kinds_by_rank_desc()[0]
+
+    def _candidate_order(self, primary: SandboxKind, primary_reason: str) -> list[dict]:
+        """``primary`` first, then the other kinds by ascending isolation rank.
+
+        Ascending (cheapest-first) fallbacks preserve the previous behaviour:
+        try the lighter backend before booting a heavier one. The isolation
+        floor is applied separately (``_enforce_min_isolation``), so a
+        higher-risk request still cannot fall back below its floor — the
+        cheaper candidates are filtered out before they are ever tried.
+        Derived from ``_isolation_rank`` so onboarding a new backend kind
+        never requires editing a hard-coded name list here.
+        """
+        return [
+            {"kind": primary, "reason": primary_reason},
+            *self._fallbacks_excluding(primary),
         ]
 
     def _enforce_min_isolation(
@@ -208,6 +234,6 @@ class SandboxRouter:
     def _fallbacks_excluding(self, kind: SandboxKind) -> list[dict]:
         return [
             {"kind": k, "reason": f"fallback to '{k}' backend"}
-            for k in ("wasm", "docker", "e2b")
+            for k in sorted(self._isolation_rank, key=lambda k: self._isolation_rank[k])
             if k != kind
         ]

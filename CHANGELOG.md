@@ -62,6 +62,22 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Changed
 
+- **Sandbox strong-isolation tier is now self-hosted** — the hosted E2B backend
+  is replaced by `MicrosandboxSandboxBackend`
+  (`titanx/sandbox/backends/microsandbox.py`), a local libkrun microVM driven by
+  the `microsandbox` SDK. The third tier no longer needs a cloud service, runs
+  commands as an **argv list with no shell** (so a `;`/`$()` inside an argument
+  is inert data rather than a second command), and forwards `env`/stdin
+  out-of-band. The capability formerly named "remote isolation" is renamed
+  **`requires_strong_isolation`**: it is a capability flag
+  (`SandboxBackendCapabilities.supports_strong_isolation`) checked against the
+  backend's advertised capabilities rather than a hard-coded backend name, so
+  any microVM-class backend — self-hosted or remote — satisfies it. **Breaking:**
+  `SandboxToolPolicy.requires_remote_isolation` and
+  `SandboxRouterInput.requires_remote_isolation` are renamed, and the third
+  `SandboxKind` member is now `"microsandbox"`. The microVM tier needs Linux +
+  KVM or Apple-Silicon macOS; where it cannot run, strong-isolation requests
+  **fail closed** rather than silently downgrade.
 - **`AgentRuntime` split: the tool-call pipeline is now a collaborator** — the
   302-line `_execute_tool_calls` method and its support helpers (authorization
   denial, audit, `ToolMessage` construction, output validation, cancellation
@@ -209,12 +225,20 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Removed
 
+- **E2B backend** — `titanx/sandbox/backends/e2b.py`, its package exports, and
+  `tests/test_e2b_shell_quoting.py` / `tests/test_e2b_env_and_stdin.py`. The
+  `e2b` runtime dependency is replaced by `microsandbox>=0.7.0,<0.8`.
 - Dead runtime/gateway code: `AgentRuntime._effective_auto_approve`,
   `AgentRuntime.wait_for_approval` (and its `_approval_event`), and the
   unreachable `require_api_key` (`docs/design-review-2026-10-07.md` problem #15).
 
 ### Tests
 
+- `tests/test_microsandbox_backend.py` pins the argv/no-shell contract of the
+  microVM backend: command+args go to the SDK as an argv list, `env` rides the
+  SDK's `env=`, stdin rides `Stdin.bytes`, `cwd`/`timeout` ride SDK parameters,
+  and the backend advertises strong isolation. A fake `microsandbox` module is
+  injected at `sys.modules`, so no real microVM (and no KVM host) is needed.
 - `tests/test_tool_pipeline_coverage.py` closes mutation-testing survivors left
   on the §3.1 tool-pipeline extraction: it asserts PII redaction is gated by
   `ToolDefinition.requires_sanitization`, that a tool called exactly once per

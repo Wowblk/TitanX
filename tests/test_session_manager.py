@@ -48,7 +48,8 @@ class _RecorderBackend(SandboxBackend):
             kind=self.kind,
             supports_persistence=True, supports_snapshots=False,
             supports_browser=False, supports_network=False,
-            supports_package_install=False, supported_capabilities=[],
+            supports_package_install=False, supports_strong_isolation=False,
+            supported_capabilities=[],
         )
 
     async def is_available(self) -> bool:

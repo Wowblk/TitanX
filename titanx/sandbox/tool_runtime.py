@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from ..types import ToolDefinition, ToolExecutionResult, ToolRuntime
 from .path_guard import is_path_allowed, scan_shell_write_targets
-from .router import SandboxRouter
+from .router import _DEFAULT_ISOLATION_RANK, SandboxRouter
 from .session_manager import SandboxSessionManager
 from .types import (
     SandboxExecutionRequest,
@@ -222,18 +222,18 @@ class SandboxedToolRuntime(ToolRuntime):
         if not policy:
             return SandboxRouterInput()
         # Safety classifications are enforcement defaults, not merely ranking
-        # hints.  A custom tool author who marks a workload high-risk or remote
-        # must not also remember a second, easy-to-forget flag to prevent a
-        # silent downgrade.  An explicit floor may strengthen this derived
-        # constraint, but can never weaken it (``high`` + ``wasm`` must still
-        # require E2B).
+        # hints.  A custom tool author who marks a workload high-risk or
+        # strong-isolation must not also remember a second, easy-to-forget
+        # flag to prevent a silent downgrade.  An explicit floor may
+        # strengthen this derived constraint, but can never weaken it
+        # (``high`` + ``wasm`` must still require the strongest tier).
         derived_floor: SandboxKind | None = None
         if (
-            policy.requires_remote_isolation
+            policy.requires_strong_isolation
             or policy.needs_browser
             or policy.risk_level == "high"
         ):
-            derived_floor = "e2b"
+            derived_floor = "microsandbox"
         elif (
             policy.needs_filesystem
             or policy.needs_network
@@ -242,7 +242,7 @@ class SandboxedToolRuntime(ToolRuntime):
         ):
             derived_floor = "docker"
 
-        rank: dict[SandboxKind, int] = {"wasm": 1, "docker": 2, "e2b": 3}
+        rank: dict[SandboxKind, int] = dict(_DEFAULT_ISOLATION_RANK)
         explicit_floor = policy.min_isolation
         if explicit_floor is not None and explicit_floor not in rank:
             raise ValueError(f"Unknown sandbox isolation floor: {explicit_floor!r}")
@@ -260,7 +260,7 @@ class SandboxedToolRuntime(ToolRuntime):
             preferred_backend=policy.preferred_backend,
             risk_level=policy.risk_level,
             min_isolation=min_isolation,
-            requires_remote_isolation=policy.requires_remote_isolation,
+            requires_strong_isolation=policy.requires_strong_isolation,
             needs_filesystem=policy.needs_filesystem,
             needs_network=policy.needs_network,
             needs_browser=policy.needs_browser,

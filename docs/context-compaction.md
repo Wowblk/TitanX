@@ -235,7 +235,7 @@ git diff --check
 相关测试结果：**86 passed**。`compileall` 和 `git diff --check` 均通过；demo
 正常输出 `Final response: Echo: Hello, TitanX!`。
 测试使用本地模型、工具和摘要替身，真实运行主循环与压缩模块；没有调用真实
-模型、Docker 或 E2B，因此没有将模拟结果表述为真实提供方 HTTP 错误验证。
+模型、Docker 或 microsandbox，因此没有将模拟结果表述为真实提供方 HTTP 错误验证。
 
 ## 代码位置
 

@@ -6,7 +6,7 @@ from typing import Any
 from .runtime import AgentRuntime
 from .sandbox import (
     DockerSandboxBackend,
-    E2BSandboxBackend,
+    MicrosandboxSandboxBackend,
     SandboxBackend,
     SandboxRouter,
     SandboxedToolHandler,
@@ -135,7 +135,7 @@ def _default_handlers() -> list[SandboxedToolHandler]:
         SandboxedToolHandler(
             definition=ToolDefinition(
                 name="run_browser_task",
-                description="Execute a browser-oriented task in a remote isolated sandbox.",
+                description="Execute a browser-oriented task in a strongly isolated sandbox.",
                 parameters={"type": "object", "properties": {"command": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}}, "required": ["command"]},
                 requires_approval=True,
                 requires_sanitization=True,
@@ -143,9 +143,9 @@ def _default_handlers() -> list[SandboxedToolHandler]:
             request_fn=_run_browser,
             policy=SandboxToolPolicy(
                 risk_level="high",
-                min_isolation="e2b",
+                min_isolation="microsandbox",
                 needs_browser=True,
-                requires_remote_isolation=True,
+                requires_strong_isolation=True,
             ),
         ),
     ]
@@ -160,7 +160,7 @@ def _default_backends(
     raw: list[SandboxBackend] = [
         WasmSandboxBackend(commands=wasm_commands or {}, log_dir=log_dir, cache_dir=cache_dir),
         DockerSandboxBackend(),
-        E2BSandboxBackend(),
+        MicrosandboxSandboxBackend(),
     ]
     if not resilient_options:
         return raw

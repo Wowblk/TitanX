@@ -15,7 +15,7 @@ from .tool_runtime import SandboxedToolHandler, SandboxedToolRuntime
 from .session_manager import SandboxSessionManager
 from .backends import (
     DockerSandboxBackend, DockerSandboxBackendOptions,
-    E2BSandboxBackend, E2BSandboxBackendOptions,
+    MicrosandboxSandboxBackend, MicrosandboxSandboxBackendOptions,
     WasmCommandRegistration, WasmSandboxBackend,
 )
 
@@ -30,6 +30,6 @@ __all__ = [
     "SandboxedToolHandler", "SandboxedToolRuntime",
     "SandboxSessionManager",
     "DockerSandboxBackend", "DockerSandboxBackendOptions",
-    "E2BSandboxBackend", "E2BSandboxBackendOptions",
+    "MicrosandboxSandboxBackend", "MicrosandboxSandboxBackendOptions",
     "WasmCommandRegistration", "WasmSandboxBackend",
 ]

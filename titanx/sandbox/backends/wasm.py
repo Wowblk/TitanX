@@ -55,6 +55,7 @@ class WasmSandboxBackend(SandboxBackend):
             supports_browser=False,
             supports_network=False,
             supports_package_install=False,
+            supports_strong_isolation=False,
             supported_capabilities=["command-exec"],
         )
 

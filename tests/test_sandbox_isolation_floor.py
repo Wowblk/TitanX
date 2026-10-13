@@ -32,6 +32,7 @@ class _WasmOnlyBackend(SandboxBackend):
             supports_browser=False,
             supports_network=False,
             supports_package_install=False,
+            supports_strong_isolation=False,
             supported_capabilities=[],
         )
 
@@ -65,13 +66,13 @@ class TestToolPolicyIsolationFloor:
                     policy=SandboxToolPolicy(
                         risk_level="high",
                         needs_browser=True,
-                        min_isolation="e2b",
+                        min_isolation="microsandbox",
                     ),
                 )
             ],
         )
 
-        with pytest.raises(RuntimeError, match="min_isolation='e2b'"):
+        with pytest.raises(RuntimeError, match="min_isolation='microsandbox'"):
             await runtime.execute("remote_browser", {})
 
     def test_factory_defaults_have_explicit_floors(self) -> None:
@@ -81,7 +82,7 @@ class TestToolPolicyIsolationFloor:
         assert handlers["run_command"].policy is not None
         assert handlers["run_command"].policy.min_isolation == "docker"
         assert handlers["run_browser_task"].policy is not None
-        assert handlers["run_browser_task"].policy.min_isolation == "e2b"
+        assert handlers["run_browser_task"].policy.min_isolation == "microsandbox"
 
     def test_risk_classification_derives_floor_when_author_omits_one(self) -> None:
         runtime = SandboxedToolRuntime(
@@ -94,7 +95,7 @@ class TestToolPolicyIsolationFloor:
         )
         low = runtime._policy_to_router_input(SandboxToolPolicy(risk_level="low"))
 
-        assert high.min_isolation == "e2b"
+        assert high.min_isolation == "microsandbox"
         assert medium.min_isolation == "docker"
         assert low.min_isolation is None
 
@@ -111,5 +112,5 @@ class TestToolPolicyIsolationFloor:
             SandboxToolPolicy(risk_level="medium", min_isolation="wasm")
         )
 
-        assert high.min_isolation == "e2b"
+        assert high.min_isolation == "microsandbox"
         assert medium.min_isolation == "docker"

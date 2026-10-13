@@ -37,7 +37,7 @@ AgentRuntime.run_prompt(input)
   → runtime loop         (explicit signal: "continue" | "stop" | "interrupt")
       ├─ LlmAdapter.respond(config, state)   (user-supplied; TitanX is LLM-agnostic)
       ├─ ContextCompactor                    (summarize + PTL fallback on budget overflow)
-      ├─ SandboxRouter                       (WASM / Docker / E2B by risk level)
+      ├─ SandboxRouter                       (WASM / Docker / microsandbox by risk level)
       │    └─ ResilientSandboxBackend        (retry + circuit breaker wrapper)
       ├─ PolicyStore                         (dynamic policies, approval gates, break-glass)
       └─ AuditLog                            (append-only JSONL for every policy/tool event)
@@ -47,7 +47,7 @@ AgentRuntime.run_prompt(input)
 
 - **Config vs. state split**: `AgentConfig` is `@dataclass(frozen=True)`; `AgentState` is mutable. Never merge them.
 - **LlmAdapter is user-supplied**: implement `async def respond(config, state) -> LlmTurnResult` to plug in any LLM. See the offline `EchoLlm` in `titanx/application.py` for the minimal shape.
-- **Three-tier sandboxing**: WASM (low-risk, registered commands), Docker (medium, filesystem), E2B (high, remote/browser).
+- **Three-tier sandboxing**: WASM (low-risk, registered commands), Docker (medium, filesystem), microsandbox (high, strong isolation / browser). The third tier is a **self-hosted libkrun microVM** — no cloud service — and needs a host that can run it (Linux + KVM, or Apple Silicon macOS); where it can't, strong-isolation requests **fail closed** rather than downgrade.
 - **Compaction**: optional but critical for long sessions. `CompactionStrategy.summarize()` is called when the token budget is exceeded; on failure, PTL strips the oldest 20% of messages and retries.
 - **Circuit breaker**: 3-state machine (closed → open → half-open) with rolling-window failure tracking, configurable per backend.
 - **PolicyStore** snapshots are versioned for rollback; `BreakGlassController` grants time-limited elevated permissions with full audit trail.
@@ -64,7 +64,7 @@ AgentRuntime.run_prompt(input)
 | `titanx/safety/` | `SafetyLayer`: injection patterns, PII patterns, path-escape scenarios, single-pass redaction |
 | `titanx/resilience/` | `CircuitBreaker`, retry with exponential backoff + jitter, `ResilientSandboxBackend` |
 | `titanx/sandbox/` | `SandboxRouter`, `SandboxedToolRuntime`, `PathGuard`, `SessionManager` |
-| `titanx/sandbox/backends/` | `WasmSandboxBackend` (wasmtime), `DockerSandboxBackend` (aiodocker), `E2BSandboxBackend` |
+| `titanx/sandbox/backends/` | `WasmSandboxBackend` (wasmtime), `DockerSandboxBackend` (aiodocker), `MicrosandboxSandboxBackend` (libkrun microVM) |
 | `titanx/context/` | Token tracking, `ContextCompactor`, PTL retry strategy |
 | `titanx/policy/` | `PolicyStore` (snapshots/rollback), `BreakGlassController`, `AuditLog` |
 | `titanx/storage/` | `StorageBackend` interface; `PgVectorBackend` (asyncpg + pgvector), `LibsqlBackend` (Turso/SQLite) |

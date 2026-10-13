@@ -209,8 +209,8 @@ size all have fail-closed bounds configurable on `McpAdmissionPolicy`.
 ║   │    │   half-open    │       ┌────────────────────────┼──────────────────┐ ║
 ║   │    ├ retry          │       ▼                        ▼                  ▼ ║
 ║   │    │   expo+jitter  │   ┌────────┐              ┌────────┐         ┌──────┐║
-║   │    └ _is_retryable  │   │ WASM   │  low-risk    │ Docker │ medium  │ E2B  │║
-║   │                     │   │wasmtime│              │aiodocker│        │remote│║
+║   │    └ _is_retryable  │   │ WASM   │  low-risk    │ Docker │ medium  │ MSBX │║
+║   │                     │   │wasmtime│              │aiodocker│        │krunVM│║
 ║   └─────────────────────┘   └────────┘              └────────┘         └──────┘║
 ║                                   ▲                                            ║
 ║                                   │                                            ║
@@ -234,7 +234,7 @@ sequenceDiagram
     participant P as PolicyStore
     participant SR as SandboxRouter
     participant RB as ResilientBackend<br/>(retry + breaker)
-    participant B as Backend<br/>(WASM / Docker / E2B)
+    participant B as Backend<br/>(WASM / Docker / microVM)
     participant SM as SessionManager
     participant PG as PathGuard
     participant A as AuditLog
@@ -352,12 +352,12 @@ classDiagram
 
 ┌──────────┐   ┌─────────────────────────────────┐   ┌────────────────────────┐
 │  User    │   │         Host Process            │   │   Isolated Sandbox     │
-│  Input   │   │   (your Python service)         │   │   (WASM / Docker /E2B)│
+│  Input   │   │   (your Python service)         │   │  (WASM/Docker/microVM)│
 │          │   │                                 │   │                        │
 │  prompt  │──►│  ┌──────────┐    ┌───────────┐ │──►│  ┌──────────────────┐ │
 │  file    │   │  │ Safety   │──► │ Runtime   │ │   │  │ Tool process /   │ │
 │  args    │   │  │ Layer    │    │ Loop      │ │   │  │ wasmtime /       │ │
-│          │   │  └──────────┘    └─────┬─────┘ │   │  │ container / e2b  │ │
+│          │   │  └──────────┘    └─────┬─────┘ │   │  │ container / krun │ │
 └──────────┘   │       ▲                │       │   │  └──────────────────┘ │
                │       │                ▼       │   │          ▲             │
   ║ BOUNDARY 1 │       │         ┌──────────┐   │   │          │             │
