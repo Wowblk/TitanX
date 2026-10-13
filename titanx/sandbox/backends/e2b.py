@@ -71,6 +71,23 @@ class E2BSandboxBackend(SandboxBackend):
                     duration_ms=(time.perf_counter() - start) * 1000,
                 )
 
+            # E2B's SDK has no way to close stdin: ``send_stdin(pid, data)``
+            # exists but there is no EOF primitive, so a command that reads
+            # to EOF would hang. Silently dropping ``request.input`` would
+            # make the caller believe stdin was honoured — fail loudly
+            # instead, and point at a backend that can forward it.
+            if request.input is not None:
+                return SandboxExecutionResult(
+                    backend="e2b", exit_code=1, stdout="",
+                    stderr=(
+                        "E2B backend cannot forward stdin: request.input is set "
+                        "but the E2B SDK has no way to close stdin / signal EOF, "
+                        "so a command reading to EOF would hang. Route this "
+                        "workload to the Docker backend, which forwards stdin."
+                    ),
+                    duration_ms=(time.perf_counter() - start) * 1000,
+                )
+
             from e2b import Sandbox
 
             # ``commands.run`` executes its argument through a shell
@@ -91,7 +108,16 @@ class E2BSandboxBackend(SandboxBackend):
                     self._sandbox_instances[session.id] = sbx
 
             timeout_s = (request.timeout_ms / 1000) if request.timeout_ms else 60
-            result = await sbx.commands.run(cmd_str, timeout=timeout_s, cwd=request.cwd or None)
+            # ``env`` rides the SDK's own ``envs=`` parameter — the out-of-band
+            # channel — so a value like ``PATH=a; rm -rf /`` is passed as data
+            # and can never be interpreted as a second command. It must never
+            # be concatenated into ``cmd_str``.
+            result = await sbx.commands.run(
+                cmd_str,
+                timeout=timeout_s,
+                cwd=request.cwd or None,
+                envs=dict(request.env) or None,
+            )
 
             return SandboxExecutionResult(
                 backend="e2b",
