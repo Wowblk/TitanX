@@ -166,7 +166,7 @@ as a feature request, not a vulnerability.
   abuse a specific tool, TitanX layers (Safety, PolicyStore, Sandbox)
   raise the cost but do not eliminate the threat. Operators with
   high-sensitivity workloads should run a local model.
-- **Side channels in the host kernel / Docker / wasmtime / e2b**.
+- **Side channels in the host kernel / Docker / wasmtime / microsandbox**.
   We rely on the underlying isolation primitive. CVEs in those layers
   are reportable upstream, not to us.
 - **DNS rebinding against `EgressGuard`**. The guard verifies the host

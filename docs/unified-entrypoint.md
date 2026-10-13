@@ -52,7 +52,7 @@
 终端和网页通过 `create_sandboxed_runtime()` 保留默认沙箱接线。上下文校验也使用
 `DemoApplication.create_runtime()` 及相同上下文设置，但传入窄范围的合成日志工具
 和预设 adapter；该工具只在进程内生成文本，没有文件或网络操作。它验证上下文流程，
-不验证 WASM、Docker 或 E2B 的实际隔离能力。
+不验证 WASM、Docker 或 microsandbox 的实际隔离能力。
 
 当前应用使用离线模拟 adapter，包括摘要响应。上下文校验验证摘要结构、来源引用、
 预算及状态流转，不证明真实模型摘要的语义保真度。接入真实模型仍需要实现并接入

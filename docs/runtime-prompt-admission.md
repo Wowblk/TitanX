@@ -211,7 +211,7 @@ state = await runtime.run_prompt("下一条请求")
 ## 回归复现与验证
 
 回归文件：`tests/test_runtime_prompt_admission.py`。模拟模型与记录型工具，
-使用真实运行时执行；不需要模型密钥、Docker、E2B 或网络。
+使用真实运行时执行；不需要模型密钥、Docker、microsandbox 或网络。
 
 ```bash
 cd /Users/wowblk/TitanX/TitanX
@@ -267,7 +267,7 @@ git diff --check
 ```
 
 48 项是本次相关测试集合，不是全仓库测试数。全部使用本地替身或本地
-ASGI 测试客户端；没有调用真实模型、启动 Docker/E2B 或部署服务。
+ASGI 测试客户端；没有调用真实模型、启动 Docker/microsandbox 或部署服务。
 
 生产代码修改只位于 `titanx/runtime.py` 的新 prompt 入口及其 API 文档；
 使用说明同步补入 `README.md`，发布说明补入 `CHANGELOG.md` 的

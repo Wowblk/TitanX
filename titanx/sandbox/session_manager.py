@@ -14,7 +14,7 @@ Hardenings (Q19):
 1. **Bounded session count + idle TTL.** ``max_sessions`` caps total
    live sessions and ``idle_ttl_seconds`` evicts inactive ones on
    access. Eviction calls each backend's ``destroy_session`` so
-   container / E2B resources are released.
+   container / microVM resources are released.
 2. **Workspace cleanup on destroy.** A session's host workspace dir
    is removed when the session is destroyed (best-effort; failure to
    clean is logged but not raised).

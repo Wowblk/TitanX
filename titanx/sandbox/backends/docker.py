@@ -271,6 +271,7 @@ class DockerSandboxBackend(SandboxBackend):
             supports_browser=False,
             supports_network=True,
             supports_package_install=True,
+            supports_strong_isolation=False,
             supported_capabilities=["command-exec", "filesystem", "network", "snapshot", "resume"],
         )
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-SandboxKind = Literal["wasm", "docker", "e2b"]
+SandboxKind = Literal["wasm", "docker", "microsandbox"]
 SandboxRiskLevel = Literal["low", "medium", "high"]
 
 
@@ -17,8 +17,9 @@ class SandboxExecutionRequest:
     input: str | None = None
     # Absolute host paths the workload is permitted to write to. Backends are
     # expected to enforce this list at the kernel/sandbox level (e.g. read-only
-    # root filesystem + bind-mounted writable paths for Docker, equivalent
-    # mount overlays for E2B). The host-side PathGuard is defence-in-depth
+    # root filesystem + bind-mounted writable paths for Docker, an OCI
+    # image whose root filesystem is the boundary for microsandbox). The
+    # host-side PathGuard is defence-in-depth
     # only — this field is the authoritative boundary.
     allowed_write_paths: list[str] | None = None
     # Absolute host paths the workload may read but never write. Bind-mounted
@@ -83,7 +84,12 @@ class SandboxToolPolicy:
     # floor is available, execution must fail closed instead of silently
     # degrading to a weaker sandbox.
     min_isolation: SandboxKind | None = None
-    requires_remote_isolation: bool = False
+    # Require a boundary stronger than a shared-kernel container — a
+    # microVM-class sandbox (hardware-virtualisation boundary). Satisfied
+    # by any backend advertising ``supports_strong_isolation``; it is a
+    # capability, not a specific backend name, so the backend is free to
+    # be self-hosted or remote.
+    requires_strong_isolation: bool = False
     needs_filesystem: bool = False
     needs_network: bool = False
     needs_browser: bool = False
@@ -98,6 +104,11 @@ class SandboxBackendCapabilities:
     supports_browser: bool
     supports_network: bool
     supports_package_install: bool
+    # True when the backend provides a boundary stronger than a
+    # shared-kernel container (e.g. a microVM with its own guest kernel).
+    # The router consults this flag — never a concrete backend name — to
+    # satisfy ``requires_strong_isolation`` requests.
+    supports_strong_isolation: bool
     supported_capabilities: list[str]
 
 
@@ -105,14 +116,17 @@ class SandboxBackendCapabilities:
 class SandboxRouterInput:
     preferred_backend: SandboxKind | None = None
     risk_level: SandboxRiskLevel | None = None
-    requires_remote_isolation: bool = False
+    # See ``SandboxToolPolicy.requires_strong_isolation``: a hard capability
+    # requirement for a boundary stronger than a container, checked against
+    # ``SandboxBackendCapabilities.supports_strong_isolation``.
+    requires_strong_isolation: bool = False
     needs_filesystem: bool = False
     needs_network: bool = False
     needs_browser: bool = False
     needs_package_install: bool = False
     # Hard floor on sandbox isolation. ``"docker"`` rejects ``"wasm"``
-    # silently-fallback selections; ``"e2b"`` rejects everything except
-    # remote isolation. The router refuses to satisfy the request
+    # silently-fallback selections; ``"microsandbox"`` rejects everything
+    # except strong isolation. The router refuses to satisfy the request
     # below this floor — failing closed beats leaking a high-risk
     # workload onto a low-isolation backend during a partial outage.
     # ``None`` (default) preserves legacy "best effort" behaviour:

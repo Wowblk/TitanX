@@ -62,6 +62,7 @@ class _RecordingBackend(SandboxBackend):
             supports_browser=False,
             supports_network=False,
             supports_package_install=False,
+            supports_strong_isolation=False,
             supported_capabilities=[],
         )
 

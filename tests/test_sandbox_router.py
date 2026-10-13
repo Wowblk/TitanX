@@ -1,7 +1,7 @@
 """SandboxRouter min_isolation enforcement (Q18).
 
 The historical router silently fell back to a weaker backend (e.g. WASM
-when Docker / E2B were unavailable). For workloads classified as
+when Docker / microsandbox were unavailable). For workloads classified as
 ``risk_level="high"`` this was a dangerous quiet downgrade. The new
 contract requires the caller to opt into a hard floor; below that floor
 the router refuses rather than degrading.
@@ -24,17 +24,28 @@ from titanx.sandbox.types import (
 class _StubBackend(SandboxBackend):
     """Minimal SandboxBackend with controllable availability."""
 
-    def __init__(self, kind: SandboxKind, available: bool = True) -> None:
+    def __init__(
+        self,
+        kind: SandboxKind,
+        available: bool = True,
+        *,
+        strong_isolation: bool = False,
+        supports_browser: bool = False,
+    ) -> None:
         self.kind = kind
         self._available = available
+        self._strong = strong_isolation
+        self._browser = supports_browser
         self._counter = 0
 
     def capabilities(self) -> SandboxBackendCapabilities:
         return SandboxBackendCapabilities(
             kind=self.kind,
             supports_persistence=True, supports_snapshots=False,
-            supports_browser=False, supports_network=False,
-            supports_package_install=False, supported_capabilities=[],
+            supports_browser=self._browser, supports_network=False,
+            supports_package_install=False,
+            supports_strong_isolation=self._strong,
+            supported_capabilities=[],
         )
 
     async def is_available(self) -> bool:
@@ -93,10 +104,23 @@ class TestMinIsolationFloor:
         msg = str(exc_info.value)
         assert "supports_browser=False" in msg
 
-    async def test_remote_request_never_falls_back_to_local_backend(self) -> None:
+    async def test_strong_isolation_request_never_falls_back_to_container(self) -> None:
+        # Docker advertises no strong isolation, so a request that requires
+        # a stronger-than-container boundary must be refused, not silently
+        # satisfied by the container backend.
         router = SandboxRouter([_StubBackend("docker")])
-        with pytest.raises(RuntimeError, match="remote isolation"):
-            await router.select(SandboxRouterInput(requires_remote_isolation=True))
+        with pytest.raises(RuntimeError, match="strong isolation"):
+            await router.select(SandboxRouterInput(requires_strong_isolation=True))
+
+    async def test_strong_isolation_request_selects_backend_that_declares_it(self) -> None:
+        # A microVM-class backend declares the capability and must be picked
+        # over the container, regardless of the concrete backend kind string.
+        router = SandboxRouter([
+            _StubBackend("docker"),
+            _StubBackend("microsandbox", strong_isolation=True),
+        ])
+        sel = await router.select(SandboxRouterInput(requires_strong_isolation=True))
+        assert sel.backend.kind == "microsandbox"
 
 
 class TestSelectionCallback:

@@ -25,7 +25,9 @@ dependencies = [
     # sandbox
     "wasmtime>=22.0.0",
     "aiodocker>=0.21.0",
-    "e2b>=0.17.0",
+    # Self-hosted microVM tier (libkrun). Beta with breaking changes between
+    # minor releases, so the upper bound is pinned deliberately.
+    "microsandbox>=0.7.0,<0.8",
     # retrieval / embeddings (optional)
     "numpy>=1.26.0",
 ]
