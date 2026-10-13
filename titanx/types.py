@@ -99,6 +99,13 @@ class TaskState:
     """Host-owned task contract; summaries cannot grant or change permissions."""
     objective: str
     constraints: tuple[str, ...] = ()
+    # Declared, never verified. Each entry is validated to be a nonempty
+    # string, but the runtime NEVER evaluates these criteria — nothing checks
+    # tests, file writes, or that a cited reference exists. ``reason="completed"``
+    # on a ``LoopEndEvent`` therefore does not mean they were met. When a task
+    # that declared criteria completes, the runtime records a one-shot
+    # ``completion_unverified`` audit entry so the gap is attributable rather
+    # than silently assumed away; real verification is the host's job.
     acceptance_criteria: tuple[str, ...] = ()
     id: str = field(default_factory=lambda: str(uuid4()))
     revision: int = 1
@@ -158,6 +165,10 @@ class AgentConfig:
 
 @dataclass
 class AgentState:
+    # Loop-control flow only. ``"stop"`` tells the loop to terminate after the
+    # current turn; ``"interrupt"``/``"continue"`` otherwise. It is NOT a claim
+    # that the task succeeded — the runtime sets ``"stop"`` as soon as the model
+    # returns final text and never verifies a result first.
     signal: LoopSignal = "continue"
     # Iteration counter, scoped to a SINGLE run_prompt invocation. Reset to 0
     # at the start of every run_prompt so the ``max_iterations`` budget caps
@@ -305,6 +316,17 @@ class PendingApprovalEvent:
 
 @dataclass
 class LoopEndEvent:
+    """Emitted once when the run loop ends.
+
+    ``reason`` is a *loop-termination* reason, NOT a success verdict.
+    ``"completed"`` means the model produced a final text answer; it does not
+    mean the task's goal was achieved or its ``acceptance_criteria`` were met —
+    the runtime never verifies a result (tests passing, files written, cited
+    references existing). Other reasons (``"max_iterations"``, ``"halted"``,
+    ``"budget_exhausted"``, ``"pending_approval"``, ``"context_storage_failed"``,
+    …) report the cause the loop stopped. Hosts that need a success signal must
+    evaluate results themselves.
+    """
     reason: str
     type: Literal["loop_end"] = "loop_end"
 
