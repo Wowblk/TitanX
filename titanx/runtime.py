@@ -159,6 +159,9 @@ class AgentRuntime:
         # first stop only, so a client hammering an exhausted/halted session
         # cannot grow the audit log without bound. Per-call events still fire.
         self._consumption_stop_audited = False
+        # One-shot latch: warn at most once per session that a completed task
+        # declared acceptance criteria the runtime never evaluates.
+        self._completion_verified_warned = False
 
         # ``reject_pending_tool`` intentionally stays synchronous for host/UI
         # compatibility. Its ToolMessage is committed immediately, while the
@@ -855,6 +858,30 @@ class AgentRuntime:
                 await self._stop_for_context("context_storage_failed")
                 return
         self._recovery.clear_completion()
+        # ``reason == "completed"`` declares that the loop ended by producing a
+        # final answer — it is NOT a claim that the task's acceptance criteria
+        # were met. A generic SDK cannot know what "done" means for a host, so
+        # the runtime never evaluates them. Flag that once when such criteria
+        # exist, so an unchecked completion is attributable, not silent.
+        if reason == "completed" and not self._completion_verified_warned:
+            task = self.state.task
+            if task is not None and task.acceptance_criteria:
+                self._completion_verified_warned = True
+                await self._audit_log.append(AuditEntry(
+                    timestamp=now_iso(),
+                    event="completion_unverified",
+                    actor="system",
+                    reason=(
+                        "task declared acceptance_criteria but the runtime does not "
+                        "evaluate them: reason='completed' means the model produced a "
+                        "final answer, not that the criteria were met — verify in the host"
+                    ),
+                    details={
+                        "task_id": task.id,
+                        "task_revision": task.revision,
+                        "criteria_count": len(task.acceptance_criteria),
+                    },
+                ))
         previous = self._approval_resume_task
         if reason == "pending_approval":
             self._approval_resume_task = asyncio.current_task()

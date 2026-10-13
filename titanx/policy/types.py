@@ -28,6 +28,12 @@ AuditEvent = Literal[
     # configured but unenforceable. Surfaced once per session so the control
     # is never silently inert.
     "budget_unenforceable",
+    # A task that declared ``acceptance_criteria`` completed, but the runtime
+    # never evaluates them: ``reason="completed"`` means the model produced a
+    # final answer, not that the task's criteria were met. Recorded once per
+    # session so the absence of verification is attributable rather than
+    # silently assumed to have happened. See ``AgentRuntime._finish_loop``.
+    "completion_unverified",
 ]
 
 AuditActor = Literal["host", "system", "agent"]

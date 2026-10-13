@@ -304,8 +304,21 @@ class _ContextDemoLlm(EchoLlm):
 
 
 class _TerminalEvents:
+    """Print runtime events and record how the loop ended.
+
+    ``answered`` means the loop terminated by producing a final text answer
+    (``LoopEndEvent.reason == "completed"``). It is a statement about *control
+    flow*, not a verdict: the runtime does not verify that the task succeeded,
+    that a file was written, or that any ``acceptance_criteria`` were met. The
+    CLI's exit code is built on this — see the ``--help`` exit-status note.
+    """
+
     def __init__(self):
         self.reason = None
+
+    @property
+    def answered(self) -> bool:
+        return self.reason == "completed"
 
     def __call__(self, event, config, state):
         if event.type == "assistant_text":
@@ -318,7 +331,7 @@ class _TerminalEvents:
             print(f"[压缩失败] {event.reason}", file=sys.stderr)
         elif event.type == "loop_end":
             self.reason = event.reason
-            if event.reason != "completed":
+            if not self.answered:
                 print(f"[已停止] {event.reason}", file=sys.stderr)
 
 
@@ -360,7 +373,9 @@ async def _run_terminal(args, llm: LlmAdapter | None = None) -> int:
         runtime = application.create_runtime(RuntimeHooks(on_event=display))
         if args.prompt is not None:
             await runtime.run_prompt(args.prompt)
-            return 0 if display.reason == "completed" else 1
+            # Exit 0 means "the loop produced a final answer", not "the task
+            # succeeded" — the runtime never verifies a result. See --help.
+            return 0 if display.answered else 1
         print("输入消息开始；/compact 请求下次压缩，/exit 退出。")
         while True:
             try:
@@ -381,14 +396,23 @@ async def _run_terminal(args, llm: LlmAdapter | None = None) -> int:
             except (ValueError, RuntimeError) as exc:
                 print(f"[错误] {exc}", file=sys.stderr)
                 continue
-            if display.reason != "completed":
+            if not display.answered:
                 return 1
     finally:
         await application.close()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="TitanX：统一离线示例，默认启用上下文归档、转存和压缩。")
+    parser = argparse.ArgumentParser(
+        description="TitanX：统一离线示例，默认启用上下文归档、转存和压缩。",
+        epilog=(
+            "退出状态：0 仅表示本次运行以最终文本回答结束（loop_end reason=\"completed\"），"
+            "不代表任务目标已被核验达成；非 0 表示循环被停止（halted / budget_exhausted / "
+            "max_iterations 等）、上下文无法容纳，或发生错误。运行时从不评估 "
+            "acceptance_criteria——此类“完成”会在审计日志写入一条 completion_unverified。"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("prompt", nargs="?", help="单次输入；不传则进入交互终端")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--web", action="store_true", help="启动本机网页/API 服务")

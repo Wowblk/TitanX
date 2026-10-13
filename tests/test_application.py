@@ -169,3 +169,19 @@ def test_unified_and_legacy_help_have_no_storage_side_effects(tmp_path):
         assert result.returncode == 0, result.stderr
         assert "--data-dir" in result.stdout
     assert not (tmp_path / ".titanx").exists()
+
+
+def test_cli_help_documents_that_exit_zero_is_not_a_success_verdict(tmp_path):
+    # The CLI's exit code treats loop_end reason="completed" as success, which
+    # only means the model produced a final answer. Because that name otherwise
+    # reads as "the task succeeded", the help text must say what exit 0 does and
+    # does not mean — including the audit event that marks an unverified finish.
+    project = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(project / "run.py"), "--help"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    assert 'reason="completed"' in result.stdout
+    assert "completion_unverified" in result.stdout
+    assert not (tmp_path / ".titanx").exists()
