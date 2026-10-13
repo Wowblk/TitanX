@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -72,7 +73,13 @@ class E2BSandboxBackend(SandboxBackend):
 
             from e2b import Sandbox
 
-            cmd_str = " ".join([request.command, *request.args])
+            # ``commands.run`` executes its argument through a shell
+            # (``/bin/bash -l -c <cmd>``). ``command``/``args`` are tool
+            # arguments — model output, steerable by prompt injection — so
+            # each token is shell-quoted, exactly as the Docker backend and
+            # the background runner do. Without this a ``;``/``$()``/backtick
+            # in an argument runs as a second command in the sandbox.
+            cmd_str = " ".join(shlex.quote(part) for part in [request.command, *request.args])
             if session and session.id in self._sandbox_instances:
                 sbx = self._sandbox_instances[session.id]
             else:
