@@ -264,15 +264,23 @@ class DockerSandboxBackend(SandboxBackend):
             )
 
     def capabilities(self) -> SandboxBackendCapabilities:
+        # The declaration must match the configured network: a ``--network=none``
+        # container has no egress, so advertising ``supports_network=True`` would
+        # let the router start a ``needs_network`` workload that cannot reach
+        # anything. Fail closed by deriving the flag from the config.
+        network_enabled = self._opts.network != "none"
+        supported = ["command-exec", "filesystem", "snapshot", "resume"]
+        if network_enabled:
+            supported.append("network")
         return SandboxBackendCapabilities(
             kind="docker",
             supports_persistence=True,
             supports_snapshots=True,
             supports_browser=False,
-            supports_network=True,
+            supports_network=network_enabled,
             supports_package_install=True,
             supports_strong_isolation=False,
-            supported_capabilities=["command-exec", "filesystem", "network", "snapshot", "resume"],
+            supported_capabilities=supported,
         )
 
     async def is_available(self) -> bool:

@@ -11,6 +11,13 @@ backend: ``Sandbox.exec`` runs an **argv list with no shell**, so a ``;`` or
 ``stdin`` are passed out-of-band (``env=`` / ``Stdin.bytes``) and never folded
 into the command string.
 
+Networking is **off by default**: the SDK's default network profile is
+``public_only`` (live public-internet egress), so this backend passes
+``Network.none()`` explicitly unless the operator opts in with
+``network_enabled``.  ``capabilities().supports_network`` tracks that same flag,
+so the router never routes a ``needs_network`` workload onto a networkless
+microVM.
+
 The SDK is imported lazily (inside the methods that need it) so a host without
 microsandbox / KVM — or one where the operator has not configured an ``image``
 — fails ``is_available`` closed instead of at import time, and so tests can
@@ -49,6 +56,10 @@ class MicrosandboxSandboxBackendOptions:
     cpus: int | None = None
     memory: int | None = None
     name_prefix: str = "titanx"
+    # The SDK's default network profile is ``public_only``: egress to the public
+    # internet is live out of the box. A security-first backend must not inherit
+    # that silently, so the default here is no network; operators opt in.
+    network_enabled: bool = False
     executor: Callable | None = None
     file_writer: Callable | None = None
     file_reader: Callable | None = None
@@ -69,17 +80,22 @@ class MicrosandboxSandboxBackend(SandboxBackend):
         self._default_lock = asyncio.Lock()
 
     def capabilities(self) -> SandboxBackendCapabilities:
+        # Declaration must match the configured network: by default the microVM
+        # boots with no egress, so advertising ``supports_network=True`` would
+        # let the router start a ``needs_network`` workload that can reach
+        # nothing. Derive the flag from the option so the two cannot drift.
+        supported = ["command-exec", "filesystem", "browser", "snapshot", "resume"]
+        if self._opts.network_enabled:
+            supported.append("network")
         return SandboxBackendCapabilities(
             kind="microsandbox",
             supports_persistence=True,
             supports_snapshots=True,
             supports_browser=True,
-            supports_network=True,
+            supports_network=self._opts.network_enabled,
             supports_package_install=True,
             supports_strong_isolation=True,
-            supported_capabilities=[
-                "command-exec", "filesystem", "network", "browser", "snapshot", "resume",
-            ],
+            supported_capabilities=supported,
         )
 
     async def is_available(self) -> bool:
@@ -113,6 +129,18 @@ class MicrosandboxSandboxBackend(SandboxBackend):
     def _new_name(self) -> str:
         return f"{self._opts.name_prefix}-{uuid4().hex[:12]}"
 
+    def _network_kwargs(self) -> dict[str, Any]:
+        # No network by default: the SDK's own default lets a sandbox reach the
+        # public internet, which a security-first backend must not inherit
+        # silently. When disabled we pass ``Network.none()`` explicitly (rather
+        # than relying on any SDK default); when enabled we pass nothing and let
+        # the SDK apply its default egress policy.
+        if self._opts.network_enabled:
+            return {}
+        from microsandbox import Network
+
+        return {"network": Network.none()}
+
     async def _resolve_sandbox(self, session: SandboxSession | None) -> Any:
         if session is not None:
             if session.id in self._sandbox_instances:
@@ -122,7 +150,7 @@ class MicrosandboxSandboxBackend(SandboxBackend):
 
         from microsandbox import Sandbox
 
-        kwargs = self._image_kwargs()
+        kwargs = {**self._image_kwargs(), **self._network_kwargs()}
         if session is not None:
             kwargs["detached"] = True
             sbx = await Sandbox.create(name=self._new_name(), **kwargs)
@@ -203,7 +231,7 @@ class MicrosandboxSandboxBackend(SandboxBackend):
         del allowed_write_paths, allowed_read_paths, image_digest
         from microsandbox import Sandbox
 
-        kwargs = self._image_kwargs()
+        kwargs = {**self._image_kwargs(), **self._network_kwargs()}
         name = self._new_name()
         sbx = await Sandbox.create(name=name, detached=True, **kwargs)
         session = SandboxSession(id=name, backend="microsandbox", metadata=metadata or {})
@@ -262,12 +290,19 @@ class MicrosandboxSandboxBackend(SandboxBackend):
 
     async def resume(self, snapshot_id: str) -> SandboxSession:
         # ``snapshot_id`` is the value ``snapshot()`` returned — a *snapshot*
-        # id, not a sandbox name. Restoring goes through the SDK's snapshot
-        # primitive, not ``Sandbox.get`` (which looks up a live sandbox by
-        # name and would never resolve a snapshot).
+        # artifact, not a sandbox name. The SDK boots from it via the
+        # ``snapshot=`` config field (mutually exclusive with ``image=``); there
+        # is no ``Sandbox.restore``. The network policy is re-applied here too,
+        # or a restored microVM would inherit the SDK's ``public_only`` default
+        # egress while ``capabilities()`` still declares no network.
         from microsandbox import Sandbox
 
-        sbx = await Sandbox.restore(snapshot_id)
+        sbx = await Sandbox.create(
+            name=self._new_name(),
+            snapshot=snapshot_id,
+            detached=True,
+            **self._network_kwargs(),
+        )
         session = SandboxSession(id=snapshot_id, backend="microsandbox")
         self._sandbox_instances[session.id] = sbx
         return session
