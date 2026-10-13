@@ -15,10 +15,11 @@ from __future__ import annotations
 import asyncio
 import copy
 from html import escape
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import Awaitable, Callable
 
-from .policy import AuditEntry
-from .policy.execution import ExecutionAuthorizationError
+from .context.manager import CONTEXT_TOOL_NAMES, ContextManager, context_tool_definitions
+from .policy import AuditEntry, AuditLog
+from .policy.execution import ExecutionAuthorizationError, ExecutionGuard
 from .safety.egress import caller_scope
 from .state import append_message, now_iso, set_pending_approval
 from .types import (
@@ -37,11 +38,6 @@ from .types import (
     ToolResultEvent,
     ToolRuntime,
 )
-
-if TYPE_CHECKING:  # pragma: no cover - typing only, keeps sqlite out of import
-    from .context.manager import ContextManager
-    from .policy import AuditLog
-    from .policy.execution import ExecutionGuard
 
 
 class ToolCallPipeline:
@@ -185,7 +181,6 @@ class ToolCallPipeline:
 
             try:
                 with caller_scope(tool_call.name):
-                    from .context.manager import CONTEXT_TOOL_NAMES
                     if self._context_manager and tool_call.name in CONTEXT_TOOL_NAMES:
                         result = await self._context_manager.execute(tool_call.name, dispatch_args)
                     else:
@@ -477,7 +472,6 @@ class ToolCallPipeline:
         except Exception:
             raise ExecutionAuthorizationError("tool_catalog_unavailable") from None
         if self._context_manager is not None:
-            from .context.manager import context_tool_definitions
             current.extend(context_tool_definitions(
                 read_max_chars=self._context_manager.options.read_max_chars
             ))
