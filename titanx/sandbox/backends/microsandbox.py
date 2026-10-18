@@ -72,6 +72,16 @@ class MicrosandboxSandboxBackend(SandboxBackend):
     def __init__(self, options: MicrosandboxSandboxBackendOptions | None = None) -> None:
         self._opts = options or MicrosandboxSandboxBackendOptions()
         self._sandbox_instances: dict[str, Any] = {}
+        # ``SandboxHandle.snapshot()`` resolves a sandbox by *name*, and a
+        # resumed session keeps the snapshot id as its session id, so the two
+        # can differ. Track the real sandbox name instead of assuming
+        # ``session.id`` names the live microVM.
+        self._sandbox_names: dict[str, str] = {}
+        # Session ids are snapshot references after ``resume``, so a second
+        # resume of the same snapshot would overwrite the tracked instance and
+        # orphan the first microVM. Reserve the id across the await so a
+        # concurrent double-resume also fails closed.
+        self._resume_inflight: set[str] = set()
         # A session-less ``execute`` reuses one long-lived microVM rather than
         # booting a fresh one per call (booting a guest kernel is the whole
         # cost of this tier). The lock stops concurrent first-calls from each
@@ -153,8 +163,10 @@ class MicrosandboxSandboxBackend(SandboxBackend):
         kwargs = {**self._image_kwargs(), **self._network_kwargs()}
         if session is not None:
             kwargs["detached"] = True
-            sbx = await Sandbox.create(name=self._new_name(), **kwargs)
+            name = self._new_name()
+            sbx = await Sandbox.create(name=name, **kwargs)
             self._sandbox_instances[session.id] = sbx
+            self._sandbox_names[session.id] = name
             return sbx
 
         # Session-less: create the shared default microVM under a lock so two
@@ -236,9 +248,11 @@ class MicrosandboxSandboxBackend(SandboxBackend):
         sbx = await Sandbox.create(name=name, detached=True, **kwargs)
         session = SandboxSession(id=name, backend="microsandbox", metadata=metadata or {})
         self._sandbox_instances[name] = sbx
+        self._sandbox_names[name] = name
         return session
 
     async def destroy_session(self, session_id: str) -> None:
+        self._sandbox_names.pop(session_id, None)
         sbx = self._sandbox_instances.pop(session_id, None)
         if sbx is not None:
             try:
@@ -269,19 +283,26 @@ class MicrosandboxSandboxBackend(SandboxBackend):
 
     async def snapshot(self, session: SandboxSession) -> SandboxSnapshot:
         sbx = self._sandbox_instances.get(session.id)
-        if sbx is None:
+        name = self._sandbox_names.get(session.id)
+        if sbx is None or name is None:
             raise ValueError("Cannot snapshot an unknown session")
-        snap_id = session.id
         if self._opts.snapshotter:
             snap_id = await self._opts.snapshotter(sbx)
         else:
-            try:
-                from microsandbox import Snapshot
+            # ``Snapshot.create`` expects a stopped source; a live session is
+            # captured through its handle. SDK failures propagate: returning
+            # ``session.id`` here would hand ``resume`` a sandbox name as if it
+            # were a snapshot, and the restore would silently fail (or restore
+            # the wrong thing) later.
+            from microsandbox import Sandbox
 
-                snap = await Snapshot.create(sbx)
-                snap_id = getattr(snap, "name", None) or getattr(snap, "id", None) or session.id
-            except Exception:
-                snap_id = session.id
+            snap_name = f"{self._opts.name_prefix}-snap-{uuid4().hex[:12]}"
+            handle = await Sandbox.get(name)
+            snap = await handle.snapshot(snap_name)
+            snap_id = getattr(snap, "reference", None) or getattr(snap, "id", None)
+        # Both paths share the same contract: an empty id is not a snapshot.
+        if not snap_id:
+            raise RuntimeError("microsandbox snapshot returned no reference")
         return SandboxSnapshot(
             id=str(snap_id),
             created_at=datetime.now(timezone.utc).isoformat(),
@@ -290,19 +311,30 @@ class MicrosandboxSandboxBackend(SandboxBackend):
 
     async def resume(self, snapshot_id: str) -> SandboxSession:
         # ``snapshot_id`` is the value ``snapshot()`` returned — a *snapshot*
-        # artifact, not a sandbox name. The SDK boots from it via the
-        # ``snapshot=`` config field (mutually exclusive with ``image=``); there
-        # is no ``Sandbox.restore``. The network policy is re-applied here too,
-        # or a restored microVM would inherit the SDK's ``public_only`` default
-        # egress while ``capabilities()`` still declares no network.
+        # reference, not a sandbox name. The 0.7.x SDK restores through
+        # ``Sandbox.restore`` (``Sandbox.create`` has no ``snapshot=``
+        # parameter). ``disable_network`` re-applies the policy, or a restored
+        # microVM would inherit the SDK's ``public_only`` default egress while
+        # ``capabilities()`` still declares no network.
+        if snapshot_id in self._sandbox_instances or snapshot_id in self._resume_inflight:
+            raise ValueError(
+                f"Snapshot {snapshot_id!r} is already resumed in this backend; "
+                "destroy that session before resuming it again"
+            )
+
         from microsandbox import Sandbox
 
-        sbx = await Sandbox.create(
-            name=self._new_name(),
-            snapshot=snapshot_id,
-            detached=True,
-            **self._network_kwargs(),
-        )
+        name = self._new_name()
+        self._resume_inflight.add(snapshot_id)
+        try:
+            sbx = await Sandbox.restore(
+                snapshot_id,
+                name=name,
+                disable_network=not self._opts.network_enabled,
+            )
+        finally:
+            self._resume_inflight.discard(snapshot_id)
         session = SandboxSession(id=snapshot_id, backend="microsandbox")
         self._sandbox_instances[session.id] = sbx
+        self._sandbox_names[session.id] = name
         return session

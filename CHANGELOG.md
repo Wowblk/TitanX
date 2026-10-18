@@ -181,10 +181,22 @@ always be flagged in the **Changed** / **Removed** sections.
   `supports_network`/`"network"` declaration follows the same flag. Docker
   backends left at the default `network="none"` now correctly fail a
   `needs_network` request closed instead of routing it onto a networkless
-  container. `MicrosandboxSandboxBackend.resume()` was also corrected: it now
-  boots from the snapshot via `Sandbox.create(snapshot=...)` (the SDK exposes no
-  `Sandbox.restore`) and re-applies the network policy, so a restored microVM
-  cannot silently inherit the SDK's public-internet default.
+  container. `MicrosandboxSandboxBackend.resume()` was also corrected: the
+  0.7.x SDK restores via `Sandbox.restore(snapshot, name=..., disable_network=...)`
+  (`Sandbox.create` has no `snapshot=` parameter), re-applying the network policy
+  so a restored microVM cannot silently inherit the SDK's public-internet
+  default.
+- **Microsandbox snapshots fail closed instead of fabricating an id** —
+  `MicrosandboxSandboxBackend.snapshot()` swallowed every SDK exception and
+  returned the live session id (a sandbox *name*) as the snapshot id, so a
+  later `resume()` would boot from something that was never a snapshot. It now
+  captures the live session through `Sandbox.get(name).snapshot(name)` and
+  propagates SDK failures; an empty reference from either the SDK path or an
+  injected snapshotter raises. The backend tracks each session's real sandbox
+  name (resumed sessions keep the snapshot reference as their session id, so
+  the two identifiers differ), and resuming a snapshot that is already active
+  fails closed instead of overwriting the tracked instance and orphaning the
+  first microVM.
 - **One source of truth for the MCP contract fingerprint** — the discovery
   path's pin check rebuilt the contract dict inline and hashed it separately from
   the public `tool_contract_fingerprint`, so the two could drift and reject a
@@ -259,7 +271,11 @@ always be flagged in the **Changed** / **Removed** sections.
   declaration to its configured network: Docker advertises no network (and the
   router refuses `needs_network`) when left at `network="none"`, and advertises
   it when enabled. `tests/test_microsandbox_backend.py` additionally covers the
-  microVM tier's no-network default (`Network.none()`) and opt-in enable.
+  microVM tier's no-network default (`Network.none()`) and opt-in enable, plus
+  the snapshot/resume lifecycle: live capture through the sandbox handle,
+  propagated capture failures, an empty injected result, snapshotting a
+  resumed session by its restore name, `Sandbox.restore` network policy, and
+  the duplicate-resume guard.
 - `tests/test_tool_pipeline_coverage.py` closes mutation-testing survivors left
   on the §3.1 tool-pipeline extraction: it asserts PII redaction is gated by
   `ToolDefinition.requires_sanitization`, that a tool called exactly once per
