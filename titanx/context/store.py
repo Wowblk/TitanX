@@ -81,67 +81,114 @@ class ContextStore:
 class SQLiteContextStore(ContextStore):
     """Durable local store, with bounded paging and literal substring search.
 
-    SQLite operations run off the event loop. A threading lock keeps a cancelled
-    caller's still-finishing worker serialized with later calls. Each write is
-    transactional and idempotent; cancellation never commits a partial batch.
-    The lock is always released when the worker returns, so a cancelled or
-    timed-out caller cannot wedge the store. ``close`` is idempotent and, once
-    it has run, every later operation fails fast with ``ContextStoreClosedError``
-    (a ``sqlite3.ProgrammingError`` subclass) instead of touching a closed
-    connection. Own and close this store at host/application scope, not once per
-    runtime.
+    SQLite operations run off the event loop. A file-backed store opens a
+    dedicated connection per operation (WAL mode + a busy timeout), so a
+    cancelled or timed-out caller's still-running worker cannot block reads of
+    other sessions behind a process-wide lock: at worst it holds a SQLite
+    write lock, and WAL readers keep reading the last committed snapshot. A
+    ``:memory:`` database is per-connection, so that path keeps one shared
+    connection serialized by a threading lock.
+
+    Each write is transactional and idempotent; cancellation never commits a
+    partial batch. Because the worker owns its connection, cancelling the
+    awaiting coroutine leaves no wedged lock behind. ``close`` is idempotent
+    and, once it has run, every later operation fails fast with
+    ``ContextStoreClosedError`` (a ``sqlite3.ProgrammingError`` subclass).
+    Operations already in flight on their own connection finish and close it.
+    Own and close this store at host/application scope, not once per runtime.
     """
 
     # Mirrors sqlite3's own message so existing ``sqlite3.ProgrammingError``
     # handlers keep matching while callers can catch ContextStoreClosedError.
     _CLOSED_MESSAGE = "Cannot operate on a closed database."
 
+    _SCHEMA = """
+        CREATE TABLE IF NOT EXISTS messages (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL,
+            id TEXT NOT NULL, payload TEXT NOT NULL, UNIQUE(session, id));
+        CREATE INDEX IF NOT EXISTS messages_session_seq ON messages(session, seq);
+        CREATE TABLE IF NOT EXISTS artifacts (
+            session TEXT NOT NULL, id TEXT NOT NULL, content TEXT NOT NULL,
+            PRIMARY KEY(session, id));
+        CREATE TABLE IF NOT EXISTS compactions (
+            session TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL,
+            PRIMARY KEY(session, id));
+        CREATE TABLE IF NOT EXISTS tasks (
+            session TEXT PRIMARY KEY, payload TEXT NOT NULL);
+    """
+
     def __init__(self, path: str | Path) -> None:
         self._lock = threading.RLock()
         self._closed = False
-        if str(path) != ":memory:":
-            # New transcript files are private to the host account. Do not
-            # silently change permissions on an existing application database.
-            try:
-                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
-            except FileExistsError:
-                pass
-            else:
-                os.close(fd)
-        self._conn = sqlite3.connect(str(path), check_same_thread=False)
+        self._path = str(path)
+        self._shared_conn: sqlite3.Connection | None = None
+        if self._path == ":memory:":
+            self._shared_conn = self._connect()
+            self._init_schema(self._shared_conn)
+            return
+        # New transcript files are private to the host account. Do not
+        # silently change permissions on an existing application database.
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            os.close(fd)
+        conn = self._connect()
+        try:
+            # WAL lets readers proceed against the last committed snapshot
+            # while a writer is busy; it is a property of the database file,
+            # so set it once. Must run outside any transaction.
+            conn.execute("PRAGMA journal_mode=WAL")
+            self._init_schema(conn)
+        finally:
+            conn.close()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._path, check_same_thread=False)
+        # Wait for a competing writer instead of failing immediately. Reads
+        # never queue behind this: WAL readers are only briefly blocked by a
+        # checkpoint.
+        conn.execute("PRAGMA busy_timeout=5000")
         # SQLite's built-in text length/substr stop at NUL. Tool output can
         # contain it, so page using Python's Unicode character semantics.
-        self._conn.create_function("text_length", 1, len)
-        self._conn.create_function("text_page", 3, lambda value, offset, size: value[offset:offset + size])
-        self._conn.executescript("""
-            CREATE TABLE IF NOT EXISTS messages (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL,
-                id TEXT NOT NULL, payload TEXT NOT NULL, UNIQUE(session, id));
-            CREATE INDEX IF NOT EXISTS messages_session_seq ON messages(session, seq);
-            CREATE TABLE IF NOT EXISTS artifacts (
-                session TEXT NOT NULL, id TEXT NOT NULL, content TEXT NOT NULL,
-                PRIMARY KEY(session, id));
-            CREATE TABLE IF NOT EXISTS compactions (
-                session TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL,
-                PRIMARY KEY(session, id));
-            CREATE TABLE IF NOT EXISTS tasks (
-                session TEXT PRIMARY KEY, payload TEXT NOT NULL);
-        """)
+        conn.create_function("text_length", 1, len)
+        conn.create_function("text_page", 3, lambda value, offset, size: value[offset:offset + size])
+        return conn
+
+    def _init_schema(self, conn: sqlite3.Connection) -> None:
+        conn.executescript(self._SCHEMA)
 
     async def _run(self, fn):
         if self._closed:
             raise ContextStoreClosedError(self._CLOSED_MESSAGE)
-        def transaction():
-            with self._lock:
-                # Re-check under the lock so a worker that was queued before
-                # close() and resumes after it cannot fall through onto a
-                # closed connection (surfacing a raw driver error instead of a
-                # consistent, catchable signal).
-                if self._closed:
-                    raise ContextStoreClosedError(self._CLOSED_MESSAGE)
-                with self._conn:
-                    return fn(self._conn)
-        return await asyncio.to_thread(transaction)
+        if self._shared_conn is not None:
+            return await asyncio.to_thread(self._run_shared, fn)
+        return await asyncio.to_thread(self._run_isolated, fn)
+
+    def _run_shared(self, fn):
+        with self._lock:
+            # Re-check under the lock so a worker that was queued before
+            # close() and resumes after it cannot fall through onto a
+            # closed connection (surfacing a raw driver error instead of a
+            # consistent, catchable signal).
+            if self._closed:
+                raise ContextStoreClosedError(self._CLOSED_MESSAGE)
+            with self._shared_conn:
+                return fn(self._shared_conn)
+
+    def _run_isolated(self, fn):
+        # Re-check on the worker: close() may have run while this call was
+        # waiting for a thread. A connection opened after close still must not
+        # serve the operation.
+        if self._closed:
+            raise ContextStoreClosedError(self._CLOSED_MESSAGE)
+        conn = self._connect()
+        try:
+            with conn:
+                return fn(conn)
+        finally:
+            conn.close()
 
     @staticmethod
     def _rows(session_id: str, messages: list[Message]) -> list[tuple[str, str, str]]:
@@ -227,5 +274,9 @@ class SQLiteContextStore(ContextStore):
                 if self._closed:
                     return
                 self._closed = True
-                self._conn.close()
+                # Only the shared (``:memory:``) connection outlives an
+                # operation. File-backed operations own and close their own
+                # connections, so there is nothing to tear down here.
+                if self._shared_conn is not None:
+                    self._shared_conn.close()
         await asyncio.to_thread(close)

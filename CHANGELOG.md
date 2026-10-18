@@ -169,6 +169,18 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Fixed
 
+- **Context-store reads no longer queue behind a blocked write** —
+  `SQLiteContextStore` ran every operation through one shared connection
+  guarded by a process-wide `threading.RLock`. `ContextManager._wait` wraps
+  calls in `asyncio.wait_for`, which cancels the awaiting coroutine but not the
+  worker thread, so a write busy-waiting on SQLite's write lock held the Python
+  lock for its full busy timeout (up to 5 s) — every read, including reads of
+  other sessions' already-committed data, stalled or timed out behind it. A
+  file-backed store now opens a dedicated connection per operation in WAL mode
+  with an explicit `busy_timeout`, so readers proceed against the last
+  committed snapshot while a writer waits, and a cancelled caller leaves no
+  wedged lock. `:memory:` databases stay on the shared connection + lock
+  because SQLite gives each connection its own private database.
 - **Sandbox network capability now reflects the configured network** — a
   backend's `supports_network` declaration must match what it will actually
   launch, or the router starts a `needs_network` workload that can reach
