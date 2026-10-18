@@ -27,6 +27,8 @@ inject a fake module at ``sys.modules``.
 from __future__ import annotations
 
 import asyncio
+import os
+import platform
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -42,6 +44,21 @@ from ..types import (
     SandboxSession,
     SandboxSnapshot,
 )
+
+
+def _host_supports_microvm() -> bool:
+    """Whether this host can boot microsandbox microVMs.
+
+    libkrun needs Apple Silicon on macOS and accessible KVM on Linux. A
+    successful ``import microsandbox`` does not imply a usable hypervisor, so
+    availability must probe the host, not just the package.
+    """
+    system = platform.system()
+    if system == "Darwin":
+        return platform.machine() == "arm64"
+    if system == "Linux":
+        return os.access("/dev/kvm", os.R_OK | os.W_OK)
+    return False
 
 
 @dataclass
@@ -84,10 +101,11 @@ class MicrosandboxSandboxBackend(SandboxBackend):
         self._resume_inflight: set[str] = set()
         # A session-less ``execute`` reuses one long-lived microVM rather than
         # booting a fresh one per call (booting a guest kernel is the whole
-        # cost of this tier). The lock stops concurrent first-calls from each
-        # booting a microVM and orphaning the loser.
+        # cost of this tier). The lock stops concurrent first-calls — both
+        # session-less and for an unregistered session — from each booting a
+        # microVM and orphaning the loser.
         self._default_sandbox: Any | None = None
-        self._default_lock = asyncio.Lock()
+        self._create_lock = asyncio.Lock()
 
     def capabilities(self) -> SandboxBackendCapabilities:
         # Declaration must match the configured network: by default the microVM
@@ -115,6 +133,11 @@ class MicrosandboxSandboxBackend(SandboxBackend):
         # selecting this backend and only failing (as an opaque exit_code_1)
         # once the workload is dispatched.
         if not self._opts.available or not self._opts.image:
+            return False
+        # An installed package is not the same as a usable hypervisor: a Linux
+        # host without /dev/kvm, or an Intel Mac, would fail only once the
+        # workload is dispatched. Fail closed here instead.
+        if not _host_supports_microvm():
             return False
         try:
             import microsandbox  # noqa: F401
@@ -161,17 +184,20 @@ class MicrosandboxSandboxBackend(SandboxBackend):
         from microsandbox import Sandbox
 
         kwargs = {**self._image_kwargs(), **self._network_kwargs()}
-        if session is not None:
-            kwargs["detached"] = True
-            name = self._new_name()
-            sbx = await Sandbox.create(name=name, **kwargs)
-            self._sandbox_instances[session.id] = sbx
-            self._sandbox_names[session.id] = name
-            return sbx
-
-        # Session-less: create the shared default microVM under a lock so two
-        # concurrent callers cannot each boot one and orphan the loser.
-        async with self._default_lock:
+        # Boot under one lock for both paths: two concurrent first calls would
+        # otherwise each create a detached microVM and the loser's handle is
+        # lost (it keeps running, never stopped).
+        async with self._create_lock:
+            if session is not None:
+                existing = self._sandbox_instances.get(session.id)
+                if existing is not None:
+                    return existing
+                kwargs["detached"] = True
+                name = self._new_name()
+                sbx = await Sandbox.create(name=name, **kwargs)
+                self._sandbox_instances[session.id] = sbx
+                self._sandbox_names[session.id] = name
+                return sbx
             if self._default_sandbox is None:
                 self._default_sandbox = await Sandbox.create(
                     name=self._new_name(), **kwargs
