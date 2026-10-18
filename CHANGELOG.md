@@ -11,6 +11,15 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Added
 
+- **Default-wiring backend options** — `CreateSandboxedRuntimeOptions` now
+  exposes `docker_network` (default `"none"`), `microsandbox_image` (default
+  `""`), and `microsandbox_network_enabled` (default `False`), forwarded to
+  `_default_backends`. Previously the factory hard-wired
+  `DockerSandboxBackend()` and `MicrosandboxSandboxBackend()` with no options:
+  Docker could never satisfy a `needs_network` workload, and the microVM tier
+  always had `image=""`, which `is_available` fails closed on — so
+  `run_browser_task` (strong isolation) could never route in default wiring.
+  The defaults stay secure (no egress; no image).
 - **Single transcript owner** — wholesale replacement of the active message
   list now goes through one `Transcript` owner (`titanx/context/transcript.py`),
   shared by context offloading (`ContextManager.prepare`) and compaction. The
@@ -169,6 +178,43 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Fixed
 
+- **Microsandbox availability probes the host hypervisor** — `is_available()`
+  previously reported ready whenever the SDK imported and an image was set. A
+  Linux host without accessible `/dev/kvm` (or an Intel Mac) would be selected
+  for a strong-isolation workload and only fail once dispatched. It now checks
+  Apple Silicon on macOS / KVM access on Linux and fails closed elsewhere.
+- **Concurrent first use of one session boots a single microVM** — creation is
+  now guarded by a per-session lock as well as the session-less default lock,
+  so two concurrent callers for one session cannot each boot a detached
+  microVM and orphan the loser. Keying per session keeps one tenant's slow
+  cold boot from serializing every other session. `resume()` holds the same
+  lock for the snapshot id, so an execute carrying that id waits for the
+  restore instead of booting a microVM the resume would then overwrite and
+  leak.
+- **Context-store reads no longer queue behind a blocked write** —
+  `SQLiteContextStore` ran every operation through one shared connection
+  guarded by a process-wide `threading.RLock`. `ContextManager._wait` wraps
+  calls in `asyncio.wait_for`, which cancels the awaiting coroutine but not the
+  worker thread, so a write busy-waiting on SQLite's write lock held the Python
+  lock for its full busy timeout (up to 5 s) — every read, including reads of
+  other sessions' already-committed data, stalled or timed out behind it. A
+  file-backed store now opens a dedicated connection per operation in WAL mode
+  with an explicit `busy_timeout`, so readers proceed against the last
+  committed snapshot while a writer waits, and a cancelled caller leaves no
+  wedged lock. `close()` remains a write barrier: it waits for in-flight
+  workers to commit/roll back, so a timed-out caller's late write cannot land
+  after the host has quiesced the store. `:memory:` databases stay on the
+  shared connection + lock because SQLite gives each connection its own
+  private database.
+- **Secondary audit rows now inherit the owning log's schema version** —
+  `storage_secondary_sink` stamped every mirrored row with the module-level
+  `AUDIT_SCHEMA_VERSION`, ignoring `AuditLog(schema_version=...)`. A host that
+  pinned a future schema saw its JSONL and relational audit streams disagree
+  about the record shape, with no way for a consumer to reconcile them. The
+  sink now exposes `with_schema_version`, and `AuditLog.__init__` swaps in a
+  version-bound copy on attach (the sink itself is not mutated, so one sink
+  shared by two logs keeps each log's own version). Plain function sinks and
+  standalone use are unchanged.
 - **Sandbox network capability now reflects the configured network** — a
   backend's `supports_network` declaration must match what it will actually
   launch, or the router starts a `needs_network` workload that can reach

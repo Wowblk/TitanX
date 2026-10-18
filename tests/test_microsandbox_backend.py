@@ -21,11 +21,14 @@ needed to run these.
 
 from __future__ import annotations
 
+import asyncio
+import os
 import sys
 import types
 
 import pytest
 
+import titanx.sandbox.backends.microsandbox as microsandbox_backend
 from titanx.sandbox.backends.microsandbox import (
     MicrosandboxSandboxBackend,
     MicrosandboxSandboxBackendOptions,
@@ -78,16 +81,35 @@ class _FakeSandboxFactory:
     last_create_kwargs: dict | None = None
     last_restore_kwargs: dict | None = None
     last_get_name: str | None = None
+    create_calls: int = 0
+    # Optional admission gates: tests park one call inside create/restore to
+    # exercise concurrency deterministically (no sleep-based races).
+    create_started: asyncio.Event | None = None
+    create_gate: asyncio.Event | None = None
+    restore_started: asyncio.Event | None = None
+    restore_gate: asyncio.Event | None = None
 
     @staticmethod
     async def create(**kwargs) -> _RecordingSandbox:
+        _FakeSandboxFactory.create_calls += 1
         _FakeSandboxFactory.last_create_kwargs = kwargs
+        if _FakeSandboxFactory.create_started is not None:
+            _FakeSandboxFactory.create_started.set()
+        if _FakeSandboxFactory.create_gate is not None:
+            await _FakeSandboxFactory.create_gate.wait()
+        # Yield so a concurrent first call gets a chance to observe the empty
+        # cache; without this the fake completes synchronously and hides races.
+        await asyncio.sleep(0)
         _RecordingSandbox.last = _RecordingSandbox()
         return _RecordingSandbox.last
 
     @staticmethod
     async def restore(snapshot, **kwargs) -> _RecordingSandbox:
         _FakeSandboxFactory.last_restore_kwargs = {"snapshot": snapshot, **kwargs}
+        if _FakeSandboxFactory.restore_started is not None:
+            _FakeSandboxFactory.restore_started.set()
+        if _FakeSandboxFactory.restore_gate is not None:
+            await _FakeSandboxFactory.restore_gate.wait()
         _RecordingSandbox.last = _RecordingSandbox()
         return _RecordingSandbox.last
 
@@ -128,6 +150,15 @@ def _install_fake_microsandbox(monkeypatch) -> None:
     _FakeSandboxFactory.last_create_kwargs = None
     _FakeSandboxFactory.last_restore_kwargs = None
     _FakeSandboxFactory.last_get_name = None
+    _FakeSandboxFactory.create_calls = 0
+    _FakeSandboxFactory.create_started = None
+    _FakeSandboxFactory.create_gate = None
+    _FakeSandboxFactory.restore_started = None
+    _FakeSandboxFactory.restore_gate = None
+    # Keep tests hermetic on any CI host by presenting a supported host to the
+    # real probe (Linux with KVM) rather than stubbing the probe itself.
+    monkeypatch.setattr(microsandbox_backend.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(microsandbox_backend.os, "access", lambda *args: True)
 
 
 def _backend() -> MicrosandboxSandboxBackend:
@@ -426,3 +457,135 @@ async def test_resume_enables_network_when_configured(monkeypatch):
     await backend.resume("snap-123")
 
     assert _FakeSandboxFactory.last_restore_kwargs["disable_network"] is False
+
+
+async def test_is_available_follows_the_host_probe(monkeypatch):
+    # An installed SDK and a configured image are not enough: on a host with no
+    # hypervisor the router would select the strong-isolation tier and only
+    # fail later as an opaque execution error. Availability must fail closed.
+    _install_fake_microsandbox(monkeypatch)
+    backend = _backend()
+
+    # macOS: Apple Silicon only.
+    monkeypatch.setattr(microsandbox_backend.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(microsandbox_backend.platform, "machine", lambda: "x86_64")
+    assert await backend.is_available() is False
+    monkeypatch.setattr(microsandbox_backend.platform, "machine", lambda: "arm64")
+    assert await backend.is_available() is True
+
+    # Linux: both /dev/kvm access flags required.
+    monkeypatch.setattr(microsandbox_backend.platform, "system", lambda: "Linux")
+    probes: list[tuple[str, int]] = []
+
+    def access(path, mode):
+        probes.append((path, mode))
+        return access.allowed
+
+    access.allowed = False
+    monkeypatch.setattr(microsandbox_backend.os, "access", access)
+    assert await backend.is_available() is False
+    access.allowed = True
+    assert await backend.is_available() is True
+    assert ("/dev/kvm", os.R_OK | os.W_OK) in probes
+
+    # Anything else fails closed.
+    monkeypatch.setattr(microsandbox_backend.platform, "system", lambda: "Windows")
+    assert await backend.is_available() is False
+
+
+async def test_is_available_is_false_without_the_sdk(monkeypatch):
+    # The last fail-closed branch: a supported host with an image still cannot
+    # run when the package is missing.
+    _install_fake_microsandbox(monkeypatch)
+    monkeypatch.setitem(sys.modules, "microsandbox", None)
+
+    assert await _backend().is_available() is False
+
+
+async def test_concurrent_session_execute_boots_only_one_microvm(monkeypatch):
+    # Both callers miss the cache together; without a creation lock each boots
+    # a detached microVM and the loser is orphaned (no handle, never stopped).
+    _install_fake_microsandbox(monkeypatch)
+    backend = _backend()
+    session = SandboxSession(id="sess-1", backend="microsandbox")
+
+    results = await asyncio.gather(
+        backend.execute(
+            SandboxExecutionRequest(command="echo", args=["a"]), session=session
+        ),
+        backend.execute(
+            SandboxExecutionRequest(command="echo", args=["b"]), session=session
+        ),
+    )
+
+    assert _FakeSandboxFactory.create_calls == 1
+    assert [r.exit_code for r in results] == [0, 0]
+    assert len(_RecordingSandbox.last.execs) == 2
+
+
+async def test_first_boot_of_one_session_does_not_block_another(monkeypatch):
+    # The double-boot guard is per session id. Booting is slow (image pull), so
+    # one tenant's cold start must not serialize every other session's first
+    # execute.
+    _install_fake_microsandbox(monkeypatch)
+    started, gate = asyncio.Event(), asyncio.Event()
+    _FakeSandboxFactory.create_started = started
+    _FakeSandboxFactory.create_gate = gate
+    backend = _backend()
+
+    first = asyncio.create_task(
+        backend.execute(
+            SandboxExecutionRequest(command="echo", args=["a"]),
+            session=SandboxSession(id="sess-a", backend="microsandbox"),
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    second = asyncio.create_task(
+        backend.execute(
+            SandboxExecutionRequest(command="echo", args=["b"]),
+            session=SandboxSession(id="sess-b", backend="microsandbox"),
+        )
+    )
+    try:
+        await asyncio.sleep(0.05)
+        assert _FakeSandboxFactory.create_calls == 2
+    finally:
+        gate.set()
+
+    results = await asyncio.wait_for(
+        asyncio.gather(first, second), timeout=1
+    )
+    assert [r.exit_code for r in results] == [0, 0]
+
+
+async def test_execute_waits_for_an_in_flight_resume(monkeypatch):
+    # An execute carrying the snapshot id as its session id can arrive while
+    # the restore is still running. Booting a new microVM here would be
+    # overwritten by the resume and leak (no handle, never stopped), so the
+    # execute must wait for the restore and use the restored sandbox.
+    _install_fake_microsandbox(monkeypatch)
+    started, gate = asyncio.Event(), asyncio.Event()
+    _FakeSandboxFactory.restore_started = started
+    _FakeSandboxFactory.restore_gate = gate
+    backend = _backend()
+
+    resume = asyncio.create_task(backend.resume("snap-123"))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    execute = asyncio.create_task(
+        backend.execute(
+            SandboxExecutionRequest(command="echo", args=["hi"]),
+            session=SandboxSession(id="snap-123", backend="microsandbox"),
+        )
+    )
+    try:
+        await asyncio.sleep(0.05)
+        assert _FakeSandboxFactory.create_calls == 0
+        assert not execute.done()
+    finally:
+        gate.set()
+
+    session = await asyncio.wait_for(resume, timeout=1)
+    result = await asyncio.wait_for(execute, timeout=1)
+    assert session.id == "snap-123"
+    assert result.exit_code == 0
+    assert _FakeSandboxFactory.create_calls == 0
