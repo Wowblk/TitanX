@@ -21,11 +21,13 @@ needed to run these.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 
 import pytest
 
+import titanx.sandbox.backends.microsandbox as microsandbox_backend
 from titanx.sandbox.backends.microsandbox import (
     MicrosandboxSandboxBackend,
     MicrosandboxSandboxBackendOptions,
@@ -78,10 +80,15 @@ class _FakeSandboxFactory:
     last_create_kwargs: dict | None = None
     last_restore_kwargs: dict | None = None
     last_get_name: str | None = None
+    create_calls: int = 0
 
     @staticmethod
     async def create(**kwargs) -> _RecordingSandbox:
+        _FakeSandboxFactory.create_calls += 1
         _FakeSandboxFactory.last_create_kwargs = kwargs
+        # Yield so a concurrent first call gets a chance to observe the empty
+        # cache; without this the fake completes synchronously and hides races.
+        await asyncio.sleep(0)
         _RecordingSandbox.last = _RecordingSandbox()
         return _RecordingSandbox.last
 
@@ -128,6 +135,15 @@ def _install_fake_microsandbox(monkeypatch) -> None:
     _FakeSandboxFactory.last_create_kwargs = None
     _FakeSandboxFactory.last_restore_kwargs = None
     _FakeSandboxFactory.last_get_name = None
+    _FakeSandboxFactory.create_calls = 0
+    # The host probe is separate from the SDK import; keep tests hermetic on
+    # any CI host. ``raising=False`` lets the same file run against the
+    # pre-fix code (red) where the probe does not exist yet.
+    monkeypatch.setattr(
+        "titanx.sandbox.backends.microsandbox._host_supports_microvm",
+        lambda: True,
+        raising=False,
+    )
 
 
 def _backend() -> MicrosandboxSandboxBackend:
@@ -426,3 +442,58 @@ async def test_resume_enables_network_when_configured(monkeypatch):
     await backend.resume("snap-123")
 
     assert _FakeSandboxFactory.last_restore_kwargs["disable_network"] is False
+
+
+async def test_is_available_is_false_when_host_cannot_run_microvms(monkeypatch):
+    # An installed SDK and a configured image are not enough: on a host with no
+    # hypervisor the router would select the strong-isolation tier and only
+    # fail later as an opaque execution error. Availability must fail closed.
+    _install_fake_microsandbox(monkeypatch)
+    monkeypatch.setattr(
+        "titanx.sandbox.backends.microsandbox._host_supports_microvm",
+        lambda: False,
+    )
+
+    assert await _backend().is_available() is False
+
+
+def test_host_probe_requires_apple_silicon_on_macos(monkeypatch):
+    monkeypatch.setattr(microsandbox_backend.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(microsandbox_backend.platform, "machine", lambda: "x86_64")
+    assert microsandbox_backend._host_supports_microvm() is False
+
+    monkeypatch.setattr(microsandbox_backend.platform, "machine", lambda: "arm64")
+    assert microsandbox_backend._host_supports_microvm() is True
+
+
+def test_host_probe_requires_kvm_on_linux(monkeypatch):
+    monkeypatch.setattr(microsandbox_backend.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(microsandbox_backend.os, "access", lambda *args: False)
+    assert microsandbox_backend._host_supports_microvm() is False
+
+    monkeypatch.setattr(microsandbox_backend.os, "access", lambda *args: True)
+    assert microsandbox_backend._host_supports_microvm() is True
+
+
+def test_host_probe_rejects_other_platforms(monkeypatch):
+    monkeypatch.setattr(microsandbox_backend.platform, "system", lambda: "Windows")
+    assert microsandbox_backend._host_supports_microvm() is False
+
+
+async def test_concurrent_session_execute_boots_only_one_microvm(monkeypatch):
+    # Both callers miss the cache together; without a creation lock each boots
+    # a detached microVM and the loser is orphaned (no handle, never stopped).
+    _install_fake_microsandbox(monkeypatch)
+    backend = _backend()
+    session = SandboxSession(id="sess-1", backend="microsandbox")
+
+    await asyncio.gather(
+        backend.execute(
+            SandboxExecutionRequest(command="echo", args=["a"]), session=session
+        ),
+        backend.execute(
+            SandboxExecutionRequest(command="echo", args=["b"]), session=session
+        ),
+    )
+
+    assert _FakeSandboxFactory.create_calls == 1

@@ -169,6 +169,15 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Fixed
 
+- **Microsandbox availability probes the host hypervisor** — `is_available()`
+  previously reported ready whenever the SDK imported and an image was set. A
+  Linux host without accessible `/dev/kvm` (or an Intel Mac) would be selected
+  for a strong-isolation workload and only fail once dispatched. It now checks
+  Apple Silicon on macOS / KVM access on Linux and fails closed elsewhere.
+- **Concurrent first use of one session boots a single microVM** — the creation
+  lock now covers the per-session path as well as the session-less default, so
+  two concurrent callers cannot each boot a detached microVM and orphan the
+  loser.
 - **Sandbox network capability now reflects the configured network** — a
   backend's `supports_network` declaration must match what it will actually
   launch, or the router starts a `needs_network` workload that can reach
