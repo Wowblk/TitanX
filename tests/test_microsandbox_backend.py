@@ -24,6 +24,8 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 from titanx.sandbox.backends.microsandbox import (
     MicrosandboxSandboxBackend,
     MicrosandboxSandboxBackendOptions,
@@ -32,13 +34,25 @@ from titanx.sandbox.types import SandboxExecutionRequest, SandboxSession
 
 
 class _RecordingSandbox:
-    """Stand-in for a running ``microsandbox.Sandbox``."""
+    """Stand-in for a running ``microsandbox.Sandbox`` / ``SandboxHandle``."""
 
     last: "_RecordingSandbox | None" = None
+    snapshot_error: Exception | None = None
+    last_snapshot_name: str | None = None
 
     def __init__(self) -> None:
         self.execs: list[dict] = []
         self.stopped = False
+        self.snapshot_names: list[str] = []
+
+    async def snapshot(self, name: str):
+        # ``SandboxHandle.snapshot`` is the live-capture API; ``Snapshot.create``
+        # is the stopped-source variant. The backend must use the former.
+        if _RecordingSandbox.snapshot_error is not None:
+            raise _RecordingSandbox.snapshot_error
+        self.snapshot_names.append(name)
+        _RecordingSandbox.last_snapshot_name = name
+        return types.SimpleNamespace(reference=f"ref:{name}", id=f"id:{name}")
 
     async def exec(
         self,
@@ -62,11 +76,25 @@ class _RecordingSandbox:
 
 class _FakeSandboxFactory:
     last_create_kwargs: dict | None = None
+    last_restore_kwargs: dict | None = None
+    last_get_name: str | None = None
 
     @staticmethod
     async def create(**kwargs) -> _RecordingSandbox:
         _FakeSandboxFactory.last_create_kwargs = kwargs
         _RecordingSandbox.last = _RecordingSandbox()
+        return _RecordingSandbox.last
+
+    @staticmethod
+    async def restore(snapshot, **kwargs) -> _RecordingSandbox:
+        _FakeSandboxFactory.last_restore_kwargs = {"snapshot": snapshot, **kwargs}
+        _RecordingSandbox.last = _RecordingSandbox()
+        return _RecordingSandbox.last
+
+    @staticmethod
+    async def get(name: str) -> _RecordingSandbox:
+        _FakeSandboxFactory.last_get_name = name
+        assert _RecordingSandbox.last is not None, "Sandbox.get before Sandbox.create"
         return _RecordingSandbox.last
 
 
@@ -94,8 +122,12 @@ def _install_fake_microsandbox(monkeypatch) -> None:
     module.Network = _Network  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "microsandbox", module)
     _RecordingSandbox.last = None
+    _RecordingSandbox.snapshot_error = None
+    _RecordingSandbox.last_snapshot_name = None
     _Stdin.last = None
     _FakeSandboxFactory.last_create_kwargs = None
+    _FakeSandboxFactory.last_restore_kwargs = None
+    _FakeSandboxFactory.last_get_name = None
 
 
 def _backend() -> MicrosandboxSandboxBackend:
@@ -278,21 +310,119 @@ async def test_session_execute_boots_with_network_disabled(monkeypatch):
     assert _FakeSandboxFactory.last_create_kwargs["network"] == "network-none"
 
 
-async def test_resume_boots_from_snapshot_and_re_applies_network_policy(monkeypatch):
-    # The SDK restores by booting with ``snapshot=`` (there is no
-    # ``Sandbox.restore``); image and snapshot are mutually exclusive, and the
-    # network policy must be re-applied or the restored microVM would inherit
-    # the SDK's public-internet default.
+async def test_snapshot_captures_the_live_session_sandbox(monkeypatch):
+    # ``Snapshot.create`` needs a stopped source; the backend snapshots a live
+    # session, so it must resolve the handle by name and call the documented
+    # live-capture API. The returned id must be the snapshot's reference, never
+    # the live sandbox's name.
+    _install_fake_microsandbox(monkeypatch)
+    backend = _backend()
+    session = await backend.create_session()
+    sandbox_name = _FakeSandboxFactory.last_create_kwargs["name"]
+
+    snap = await backend.snapshot(session)
+
+    captured_name = _RecordingSandbox.last_snapshot_name
+    assert _FakeSandboxFactory.last_get_name == sandbox_name
+    assert captured_name.startswith("titanx-snap-")
+    assert captured_name != session.id
+    assert snap.backend == "microsandbox"
+    assert snap.id == f"ref:{captured_name}"
+
+
+async def test_snapshot_propagates_sdk_failure_instead_of_faking_an_id(monkeypatch):
+    # The old implementation swallowed every exception and returned
+    # ``session.id`` (the live sandbox name) as if the snapshot succeeded.
+    # A later ``resume`` would then boot from a non-snapshot. Fail closed.
+    _install_fake_microsandbox(monkeypatch)
+    backend = _backend()
+    session = await backend.create_session()
+    _RecordingSandbox.snapshot_error = RuntimeError("snapshot failed")
+
+    with pytest.raises(RuntimeError, match="snapshot failed"):
+        await backend.snapshot(session)
+
+
+async def test_snapshot_unknown_session_still_raises(monkeypatch):
+    _install_fake_microsandbox(monkeypatch)
+    session = SandboxSession(id="never-created", backend="microsandbox")
+
+    with pytest.raises(ValueError, match="unknown session"):
+        await _backend().snapshot(session)
+
+
+async def test_snapshot_after_resume_targets_the_restored_sandbox(monkeypatch):
+    # A resumed session keeps the snapshot reference as its session id, while
+    # the live microVM has a fresh restore name. Snapshotting it must resolve
+    # the *name*, not the snapshot id — this is the path the name map exists
+    # for, and the only one where the two identifiers differ.
+    _install_fake_microsandbox(monkeypatch)
+    backend = _backend()
+    session = await backend.resume("snap-123")
+    restore_name = _FakeSandboxFactory.last_restore_kwargs["name"]
+
+    snap = await backend.snapshot(session)
+
+    assert _FakeSandboxFactory.last_get_name == restore_name
+    assert _FakeSandboxFactory.last_get_name != session.id
+    assert snap.id == f"ref:{_RecordingSandbox.last_snapshot_name}"
+
+
+async def test_injected_snapshotter_empty_result_fails_closed(monkeypatch):
+    # The injected hook must obey the same fail-closed contract as the SDK
+    # path: an empty id is not a snapshot.
+    _install_fake_microsandbox(monkeypatch)
+
+    async def _empty_snapshotter(sbx):
+        return None
+
+    backend = MicrosandboxSandboxBackend(
+        MicrosandboxSandboxBackendOptions(
+            available=True, image="python", snapshotter=_empty_snapshotter
+        )
+    )
+    session = await backend.create_session()
+
+    with pytest.raises(RuntimeError, match="no reference"):
+        await backend.snapshot(session)
+
+
+async def test_resuming_an_already_active_snapshot_fails_closed(monkeypatch):
+    # Session ids are snapshot references, so a second resume would overwrite
+    # the tracked instance and orphan the first microVM.
+    _install_fake_microsandbox(monkeypatch)
+    backend = _backend()
+    await backend.resume("snap-123")
+
+    with pytest.raises(ValueError, match="already resumed"):
+        await backend.resume("snap-123")
+
+
+async def test_resume_restores_from_snapshot_with_network_disabled(monkeypatch):
+    # The 0.7.x SDK restores via ``Sandbox.restore(snapshot, name=...,
+    # disable_network=...)``; ``Sandbox.create`` has no ``snapshot=`` parameter.
+    # The network policy must be re-applied or the restored microVM would
+    # inherit the SDK's public-internet default.
     _install_fake_microsandbox(monkeypatch)
 
     session = await _backend().resume("snap-123")
 
-    kwargs = _FakeSandboxFactory.last_create_kwargs
-    assert kwargs["snapshot"] == "snap-123"
-    assert "image" not in kwargs
-    assert kwargs["network"] == "network-none"
-    # Fresh name (not the snapshot id) and detached, so the restored microVM
-    # survives the creating call.
-    assert kwargs["name"] != "snap-123"
-    assert kwargs["detached"] is True
+    call = _FakeSandboxFactory.last_restore_kwargs
+    assert call["snapshot"] == "snap-123"
+    assert call["name"] != "snap-123"
+    assert call["disable_network"] is True
+    assert _FakeSandboxFactory.last_create_kwargs is None
     assert session.id == "snap-123"
+
+
+async def test_resume_enables_network_when_configured(monkeypatch):
+    _install_fake_microsandbox(monkeypatch)
+    backend = MicrosandboxSandboxBackend(
+        MicrosandboxSandboxBackendOptions(
+            available=True, image="python", network_enabled=True
+        )
+    )
+
+    await backend.resume("snap-123")
+
+    assert _FakeSandboxFactory.last_restore_kwargs["disable_network"] is False
