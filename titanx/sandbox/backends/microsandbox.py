@@ -94,18 +94,19 @@ class MicrosandboxSandboxBackend(SandboxBackend):
         # can differ. Track the real sandbox name instead of assuming
         # ``session.id`` names the live microVM.
         self._sandbox_names: dict[str, str] = {}
-        # Session ids are snapshot references after ``resume``, so a second
-        # resume of the same snapshot would overwrite the tracked instance and
-        # orphan the first microVM. Reserve the id across the await so a
-        # concurrent double-resume also fails closed.
-        self._resume_inflight: set[str] = set()
+        # Per-session creation locks: two concurrent first calls for the same
+        # session would otherwise each boot a detached microVM and orphan the
+        # loser. They are also held by ``resume`` for the snapshot id, so an
+        # execute carrying that id waits for the restore instead of booting a
+        # microVM the resume would overwrite (and leak). Keying per session
+        # keeps one tenant's slow cold boot from blocking every other session.
+        self._session_locks: dict[str, asyncio.Lock] = {}
         # A session-less ``execute`` reuses one long-lived microVM rather than
         # booting a fresh one per call (booting a guest kernel is the whole
-        # cost of this tier). The lock stops concurrent first-calls — both
-        # session-less and for an unregistered session — from each booting a
-        # microVM and orphaning the loser.
+        # cost of this tier). The lock stops concurrent session-less
+        # first-calls from each booting a microVM.
         self._default_sandbox: Any | None = None
-        self._create_lock = asyncio.Lock()
+        self._default_lock = asyncio.Lock()
 
     def capabilities(self) -> SandboxBackendCapabilities:
         # Declaration must match the configured network: by default the microVM
@@ -174,35 +175,43 @@ class MicrosandboxSandboxBackend(SandboxBackend):
 
         return {"network": Network.none()}
 
+    def _session_lock(self, session_id: str) -> asyncio.Lock:
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = self._session_locks[session_id] = asyncio.Lock()
+        return lock
+
     async def _resolve_sandbox(self, session: SandboxSession | None) -> Any:
         if session is not None:
-            if session.id in self._sandbox_instances:
-                return self._sandbox_instances[session.id]
+            existing = self._sandbox_instances.get(session.id)
+            if existing is not None:
+                return existing
         elif self._default_sandbox is not None:
             return self._default_sandbox
 
         from microsandbox import Sandbox
 
         kwargs = {**self._image_kwargs(), **self._network_kwargs()}
-        # Boot under one lock for both paths: two concurrent first calls would
-        # otherwise each create a detached microVM and the loser's handle is
-        # lost (it keeps running, never stopped).
-        async with self._create_lock:
-            if session is not None:
-                existing = self._sandbox_instances.get(session.id)
-                if existing is not None:
-                    return existing
-                kwargs["detached"] = True
-                name = self._new_name()
-                sbx = await Sandbox.create(name=name, **kwargs)
-                self._sandbox_instances[session.id] = sbx
-                self._sandbox_names[session.id] = name
-                return sbx
-            if self._default_sandbox is None:
-                self._default_sandbox = await Sandbox.create(
-                    name=self._new_name(), **kwargs
-                )
-            return self._default_sandbox
+        if session is None:
+            async with self._default_lock:
+                if self._default_sandbox is None:
+                    self._default_sandbox = await Sandbox.create(
+                        name=self._new_name(), **kwargs
+                    )
+                return self._default_sandbox
+
+        # The lock is shared with ``resume`` for the same id, so a concurrent
+        # double-create (or an execute racing a restore) cannot boot twice.
+        async with self._session_lock(session.id):
+            existing = self._sandbox_instances.get(session.id)
+            if existing is not None:
+                return existing
+            kwargs["detached"] = True
+            name = self._new_name()
+            sbx = await Sandbox.create(name=name, **kwargs)
+            self._sandbox_instances[session.id] = sbx
+            self._sandbox_names[session.id] = name
+            return sbx
 
     async def execute(
         self,
@@ -285,6 +294,12 @@ class MicrosandboxSandboxBackend(SandboxBackend):
                 await sbx.stop()
             except Exception:
                 pass
+        lock = self._session_locks.get(session_id)
+        # Only drop the lock when nobody holds it: a waiter means a first-call
+        # is in flight, and a fresh lock object would let a later caller race
+        # it into a second boot.
+        if lock is not None and not lock.locked():
+            self._session_locks.pop(session_id, None)
 
     async def write_files(
         self, files: list[SandboxFileEntry], session: SandboxSession | None = None
@@ -342,25 +357,24 @@ class MicrosandboxSandboxBackend(SandboxBackend):
         # parameter). ``disable_network`` re-applies the policy, or a restored
         # microVM would inherit the SDK's ``public_only`` default egress while
         # ``capabilities()`` still declares no network.
-        if snapshot_id in self._sandbox_instances or snapshot_id in self._resume_inflight:
-            raise ValueError(
-                f"Snapshot {snapshot_id!r} is already resumed in this backend; "
-                "destroy that session before resuming it again"
-            )
-
         from microsandbox import Sandbox
 
-        name = self._new_name()
-        self._resume_inflight.add(snapshot_id)
-        try:
+        # Hold the same per-id lock ``_resolve_sandbox`` uses: a concurrent
+        # double-resume, or an execute carrying this snapshot id, must observe
+        # the registered instance rather than overwrite/boot alongside it.
+        async with self._session_lock(snapshot_id):
+            if snapshot_id in self._sandbox_instances:
+                raise ValueError(
+                    f"Snapshot {snapshot_id!r} is already resumed in this backend; "
+                    "destroy that session before resuming it again"
+                )
+            name = self._new_name()
             sbx = await Sandbox.restore(
                 snapshot_id,
                 name=name,
                 disable_network=not self._opts.network_enabled,
             )
-        finally:
-            self._resume_inflight.discard(snapshot_id)
-        session = SandboxSession(id=snapshot_id, backend="microsandbox")
-        self._sandbox_instances[session.id] = sbx
-        self._sandbox_names[session.id] = name
-        return session
+            session = SandboxSession(id=snapshot_id, backend="microsandbox")
+            self._sandbox_instances[session.id] = sbx
+            self._sandbox_names[session.id] = name
+            return session

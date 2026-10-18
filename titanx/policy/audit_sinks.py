@@ -34,20 +34,27 @@ class _LogSink:
 class _StorageSecondarySink:
     """Callable adapter that mirrors entries into ``StorageBackend.save_log``.
 
-    ``AuditLog`` binds the configured schema version through
-    ``bind_schema_version`` when the sink is attached, so a mirrored row
-    never claims a different record shape from the JSONL line it mirrors.
-    Without an owner (direct use in tests or custom wiring) the module
-    constant remains the default.
+    ``AuditLog`` replaces this sink with a copy bound to its configured schema
+    version when attached, so a mirrored row never claims a different record
+    shape from the JSONL line it mirrors. Binding returns a new object, so one
+    sink shared by several logs (different deployments/tenants) keeps each
+    log's version. Without an owner (direct use in tests or custom wiring) the
+    module constant remains the default.
     """
+
+    # Opt-in marker: ``AuditLog`` only rebinds sinks that explicitly declare
+    # they mirror its record shape, so custom callables are never touched.
+    _binds_audit_schema_version = True
 
     def __init__(self, storage: _LogSink, session_id: str | None) -> None:
         self._storage = storage
         self._session_id = session_id
         self._schema_version = AUDIT_SCHEMA_VERSION
 
-    def bind_schema_version(self, version: int) -> None:
-        self._schema_version = version
+    def with_schema_version(self, version: int) -> "_StorageSecondarySink":
+        bound = _StorageSecondarySink(self._storage, self._session_id)
+        bound._schema_version = version
+        return bound
 
     async def __call__(self, entry: AuditEntry) -> None:
         # Parse the ISO-8601 timestamp the audit pipeline emits. The

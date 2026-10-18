@@ -92,9 +92,10 @@ class SQLiteContextStore(ContextStore):
     Each write is transactional and idempotent; cancellation never commits a
     partial batch. Because the worker owns its connection, cancelling the
     awaiting coroutine leaves no wedged lock behind. ``close`` is idempotent
-    and, once it has run, every later operation fails fast with
+    and acts as a write barrier: it stops accepting new operations, waits for
+    in-flight workers to commit (or roll back) and close their connections,
+    then returns. Every later operation fails fast with
     ``ContextStoreClosedError`` (a ``sqlite3.ProgrammingError`` subclass).
-    Operations already in flight on their own connection finish and close it.
     Own and close this store at host/application scope, not once per runtime.
     """
 
@@ -119,6 +120,10 @@ class SQLiteContextStore(ContextStore):
 
     def __init__(self, path: str | Path) -> None:
         self._lock = threading.RLock()
+        # ``close`` waits on this condition until every worker that passed the
+        # closed check has committed/rolled back and closed its connection.
+        self._idle = threading.Condition(self._lock)
+        self._active_ops = 0
         self._closed = False
         self._path = str(path)
         self._shared_conn: sqlite3.Connection | None = None
@@ -148,8 +153,11 @@ class SQLiteContextStore(ContextStore):
         conn = sqlite3.connect(self._path, check_same_thread=False)
         # Wait for a competing writer instead of failing immediately. Reads
         # never queue behind this: WAL readers are only briefly blocked by a
-        # checkpoint.
-        conn.execute("PRAGMA busy_timeout=5000")
+        # checkpoint. The timeout deliberately exceeds the ContextManager's
+        # default 10 s storage timeout, so a contended caller times out (and
+        # is cancelled) under its own deadline rather than surfacing a raw
+        # "database is locked" driver error from SQLite's shorter default.
+        conn.execute("PRAGMA busy_timeout=30000")
         # SQLite's built-in text length/substr stop at NUL. Tool output can
         # contain it, so page using Python's Unicode character semantics.
         conn.create_function("text_length", 1, len)
@@ -178,17 +186,26 @@ class SQLiteContextStore(ContextStore):
                 return fn(self._shared_conn)
 
     def _run_isolated(self, fn):
-        # Re-check on the worker: close() may have run while this call was
-        # waiting for a thread. A connection opened after close still must not
-        # serve the operation.
-        if self._closed:
-            raise ContextStoreClosedError(self._CLOSED_MESSAGE)
-        conn = self._connect()
+        # Re-check and reserve under the lock: close() may have run while this
+        # call was waiting for a thread, and once it has set the flag no new
+        # connection may be opened. The reservation is what lets close() wait
+        # for a worker that already passed the check.
+        with self._idle:
+            if self._closed:
+                raise ContextStoreClosedError(self._CLOSED_MESSAGE)
+            self._active_ops += 1
         try:
-            with conn:
-                return fn(conn)
+            conn = self._connect()
+            try:
+                with conn:
+                    return fn(conn)
+            finally:
+                conn.close()
         finally:
-            conn.close()
+            with self._idle:
+                self._active_ops -= 1
+                if not self._active_ops:
+                    self._idle.notify_all()
 
     @staticmethod
     def _rows(session_id: str, messages: list[Message]) -> list[tuple[str, str, str]]:
@@ -268,12 +285,19 @@ class SQLiteContextStore(ContextStore):
         if self._closed:
             return
         def close():
-            with self._lock:
+            with self._idle:
                 # Idempotent under concurrency: whichever worker gets the lock
                 # first closes once; the rest observe the flag and return.
                 if self._closed:
                     return
                 self._closed = True
+                # Wait until every file-backed worker that already passed the
+                # closed check has committed/rolled back and closed its
+                # connection. Otherwise a timed-out caller's worker could keep
+                # writing after the host has quiesced the store (and after a
+                # successor store at the same path was opened).
+                while self._active_ops:
+                    self._idle.wait()
                 # Only the shared (``:memory:``) connection outlives an
                 # operation. File-backed operations own and close their own
                 # connections, so there is nothing to tear down here.

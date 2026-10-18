@@ -211,13 +211,14 @@ class AuditLog:
         self._start_lock = asyncio.Lock()
         self._closed = False
         self._io_disabled = False  # set True after persistent file IO failure
+        # A mirroring sink stamps ``schema`` itself; give it a copy bound to
+        # this log's version so the mirrored record cannot claim a different
+        # shape from the JSONL line it duplicates. Opt-in via a marker (and a
+        # new object, not mutation) so plain callables are untouched and one
+        # sink shared by two logs keeps each log's own version.
+        if getattr(secondary_sink, "_binds_audit_schema_version", False):
+            secondary_sink = secondary_sink.with_schema_version(schema_version)
         self._secondary_sink: SecondarySink | None = secondary_sink
-        # A mirroring sink stamps ``schema`` itself; bind this log's version so
-        # the mirrored record cannot claim a different shape from the JSONL
-        # line it duplicates. Duck-typed: plain callables need no binding.
-        bind_schema_version = getattr(secondary_sink, "bind_schema_version", None)
-        if callable(bind_schema_version):
-            bind_schema_version(schema_version)
         self._secondary_disabled = False  # set True after sink raises
 
     async def append(self, entry: AuditEntry) -> None:

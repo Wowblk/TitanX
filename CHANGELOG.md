@@ -183,10 +183,14 @@ always be flagged in the **Changed** / **Removed** sections.
   Linux host without accessible `/dev/kvm` (or an Intel Mac) would be selected
   for a strong-isolation workload and only fail once dispatched. It now checks
   Apple Silicon on macOS / KVM access on Linux and fails closed elsewhere.
-- **Concurrent first use of one session boots a single microVM** — the creation
-  lock now covers the per-session path as well as the session-less default, so
-  two concurrent callers cannot each boot a detached microVM and orphan the
-  loser.
+- **Concurrent first use of one session boots a single microVM** — creation is
+  now guarded by a per-session lock as well as the session-less default lock,
+  so two concurrent callers for one session cannot each boot a detached
+  microVM and orphan the loser. Keying per session keeps one tenant's slow
+  cold boot from serializing every other session. `resume()` holds the same
+  lock for the snapshot id, so an execute carrying that id waits for the
+  restore instead of booting a microVM the resume would then overwrite and
+  leak.
 - **Context-store reads no longer queue behind a blocked write** —
   `SQLiteContextStore` ran every operation through one shared connection
   guarded by a process-wide `threading.RLock`. `ContextManager._wait` wraps
@@ -197,16 +201,20 @@ always be flagged in the **Changed** / **Removed** sections.
   file-backed store now opens a dedicated connection per operation in WAL mode
   with an explicit `busy_timeout`, so readers proceed against the last
   committed snapshot while a writer waits, and a cancelled caller leaves no
-  wedged lock. `:memory:` databases stay on the shared connection + lock
-  because SQLite gives each connection its own private database.
+  wedged lock. `close()` remains a write barrier: it waits for in-flight
+  workers to commit/roll back, so a timed-out caller's late write cannot land
+  after the host has quiesced the store. `:memory:` databases stay on the
+  shared connection + lock because SQLite gives each connection its own
+  private database.
 - **Secondary audit rows now inherit the owning log's schema version** —
   `storage_secondary_sink` stamped every mirrored row with the module-level
   `AUDIT_SCHEMA_VERSION`, ignoring `AuditLog(schema_version=...)`. A host that
   pinned a future schema saw its JSONL and relational audit streams disagree
   about the record shape, with no way for a consumer to reconcile them. The
-  sink is now a callable with `bind_schema_version`; `AuditLog.__init__` binds
-  its configured version on attach, while plain function sinks and standalone
-  use keep working unchanged.
+  sink now exposes `with_schema_version`, and `AuditLog.__init__` swaps in a
+  version-bound copy on attach (the sink itself is not mutated, so one sink
+  shared by two logs keeps each log's own version). Plain function sinks and
+  standalone use are unchanged.
 - **Sandbox network capability now reflects the configured network** — a
   backend's `supports_network` declaration must match what it will actually
   launch, or the router starts a `needs_network` workload that can reach

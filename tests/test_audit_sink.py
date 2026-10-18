@@ -206,6 +206,34 @@ class TestSchemaVersionAlignment:
         assert disk["schema"] == 7
         assert mirrored["data"]["schema"] == 7
 
+    async def test_two_logs_sharing_one_sink_keep_their_own_versions(self, tmp_path) -> None:
+        # Binding must not mutate the sink: a module-level sink reused by two
+        # logs (different deployments/tenants) must stamp each log's own
+        # version, or the v7 log's mirrored rows claim to be v9.
+        storage = _CapturingStorage()
+        sink = storage_secondary_sink(storage, session_id="sid")
+        seven = AuditLog(str(tmp_path / "seven.jsonl"), schema_version=7, secondary_sink=sink)
+        nine = AuditLog(str(tmp_path / "nine.jsonl"), schema_version=9, secondary_sink=sink)
+
+        await seven.append(AuditEntry(
+            timestamp="2026-10-07T12:00:00+00:00",
+            event="seven",
+            actor="host",
+            reason="v7",
+        ))
+        await nine.append(AuditEntry(
+            timestamp="2026-10-07T12:00:00+00:00",
+            event="nine",
+            actor="host",
+            reason="v9",
+        ))
+        await seven.aclose()
+        await nine.aclose()
+
+        by_event = {call["event"]: call for call in storage.calls}
+        assert by_event["seven"]["data"]["schema"] == 7
+        assert by_event["nine"]["data"]["schema"] == 9
+
     async def test_standalone_sink_uses_the_module_schema_version(self) -> None:
         # The adapter is usable without an owning AuditLog (tests, custom
         # wiring); then the module constant is the only available version.
