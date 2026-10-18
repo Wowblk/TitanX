@@ -6,7 +6,9 @@ from typing import Any
 from .runtime import AgentRuntime
 from .sandbox import (
     DockerSandboxBackend,
+    DockerSandboxBackendOptions,
     MicrosandboxSandboxBackend,
+    MicrosandboxSandboxBackendOptions,
     SandboxBackend,
     SandboxRouter,
     SandboxedToolHandler,
@@ -59,6 +61,14 @@ class CreateSandboxedRuntimeOptions:
     enable_ironclaw_wasm_tools: bool = False
     ironclaw_wasm_tool_names: list[str] | None = None
     ironclaw_wasm_command_overrides: dict[str, str] | None = None
+    # Default-wiring backend configuration. The defaults are the secure
+    # choice (no egress on either tier); operators opt in explicitly. The
+    # microVM image is the isolation envelope, so it has no default: without
+    # one the strong-isolation tier stays unavailable rather than silently
+    # booting an unconfigured environment.
+    docker_network: str = "none"
+    microsandbox_image: str = ""
+    microsandbox_network_enabled: bool = False
 
 
 def _default_handlers() -> list[SandboxedToolHandler]:
@@ -156,11 +166,20 @@ def _default_backends(
     log_dir: str | None,
     cache_dir: str | None,
     resilient_options: ResilientOptions | None,
+    *,
+    docker_network: str = "none",
+    microsandbox_image: str = "",
+    microsandbox_network_enabled: bool = False,
 ) -> list[SandboxBackend]:
     raw: list[SandboxBackend] = [
         WasmSandboxBackend(commands=wasm_commands or {}, log_dir=log_dir, cache_dir=cache_dir),
-        DockerSandboxBackend(),
-        MicrosandboxSandboxBackend(),
+        DockerSandboxBackend(DockerSandboxBackendOptions(network=docker_network)),
+        MicrosandboxSandboxBackend(
+            MicrosandboxSandboxBackendOptions(
+                image=microsandbox_image,
+                network_enabled=microsandbox_network_enabled,
+            )
+        ),
     ]
     if not resilient_options:
         return raw
@@ -201,7 +220,13 @@ def _resolve_policy_store(options: CreateSandboxedRuntimeOptions) -> PolicyStore
 
 def create_sandboxed_runtime(options: CreateSandboxedRuntimeOptions) -> AgentRuntime:
     backends = options.backends or _default_backends(
-        options.wasm_commands, options.log_dir, options.cache_dir, options.resilient_options
+        options.wasm_commands,
+        options.log_dir,
+        options.cache_dir,
+        options.resilient_options,
+        docker_network=options.docker_network,
+        microsandbox_image=options.microsandbox_image,
+        microsandbox_network_enabled=options.microsandbox_network_enabled,
     )
     router = SandboxRouter(backends)
     handlers = list(options.tool_handlers or _default_handlers())

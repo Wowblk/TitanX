@@ -11,6 +11,15 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Added
 
+- **Default-wiring backend options** — `CreateSandboxedRuntimeOptions` now
+  exposes `docker_network` (default `"none"`), `microsandbox_image` (default
+  `""`), and `microsandbox_network_enabled` (default `False`), forwarded to
+  `_default_backends`. Previously the factory hard-wired
+  `DockerSandboxBackend()` and `MicrosandboxSandboxBackend()` with no options:
+  Docker could never satisfy a `needs_network` workload, and the microVM tier
+  always had `image=""`, which `is_available` fails closed on — so
+  `run_browser_task` (strong isolation) could never route in default wiring.
+  The defaults stay secure (no egress; no image).
 - **Single transcript owner** — wholesale replacement of the active message
   list now goes through one `Transcript` owner (`titanx/context/transcript.py`),
   shared by context offloading (`ContextManager.prepare`) and compaction. The
