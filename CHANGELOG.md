@@ -169,6 +169,14 @@ always be flagged in the **Changed** / **Removed** sections.
 
 ### Fixed
 
+- **Secondary audit rows now inherit the owning log's schema version** —
+  `storage_secondary_sink` stamped every mirrored row with the module-level
+  `AUDIT_SCHEMA_VERSION`, ignoring `AuditLog(schema_version=...)`. A host that
+  pinned a future schema saw its JSONL and relational audit streams disagree
+  about the record shape, with no way for a consumer to reconcile them. The
+  sink is now a callable with `bind_schema_version`; `AuditLog.__init__` binds
+  its configured version on attach, while plain function sinks and standalone
+  use keep working unchanged.
 - **Sandbox network capability now reflects the configured network** — a
   backend's `supports_network` declaration must match what it will actually
   launch, or the router starts a `needs_network` workload that can reach

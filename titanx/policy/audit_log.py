@@ -212,6 +212,12 @@ class AuditLog:
         self._closed = False
         self._io_disabled = False  # set True after persistent file IO failure
         self._secondary_sink: SecondarySink | None = secondary_sink
+        # A mirroring sink stamps ``schema`` itself; bind this log's version so
+        # the mirrored record cannot claim a different shape from the JSONL
+        # line it duplicates. Duck-typed: plain callables need no binding.
+        bind_schema_version = getattr(secondary_sink, "bind_schema_version", None)
+        if callable(bind_schema_version):
+            bind_schema_version(schema_version)
         self._secondary_disabled = False  # set True after sink raises
 
     async def append(self, entry: AuditEntry) -> None:

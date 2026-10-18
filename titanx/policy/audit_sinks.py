@@ -31,6 +31,50 @@ class _LogSink:
         raise NotImplementedError
 
 
+class _StorageSecondarySink:
+    """Callable adapter that mirrors entries into ``StorageBackend.save_log``.
+
+    ``AuditLog`` binds the configured schema version through
+    ``bind_schema_version`` when the sink is attached, so a mirrored row
+    never claims a different record shape from the JSONL line it mirrors.
+    Without an owner (direct use in tests or custom wiring) the module
+    constant remains the default.
+    """
+
+    def __init__(self, storage: _LogSink, session_id: str | None) -> None:
+        self._storage = storage
+        self._session_id = session_id
+        self._schema_version = AUDIT_SCHEMA_VERSION
+
+    def bind_schema_version(self, version: int) -> None:
+        self._schema_version = version
+
+    async def __call__(self, entry: AuditEntry) -> None:
+        # Parse the ISO-8601 timestamp the audit pipeline emits. The
+        # sink interface wants a real datetime so the storage layer
+        # can index it. Fall back to "now" if the entry's timestamp is
+        # somehow non-parseable — failure-here cascades into "no audit
+        # row" which is worse than "audit row with slightly wrong ts".
+        try:
+            ts = datetime.fromisoformat(entry.timestamp)
+        except Exception:
+            ts = datetime.now(timezone.utc)
+        # Mirror the canonical JSONL record exactly, then promote the
+        # per-event fields out of ``details`` so nothing is dropped and
+        # the execution fields stay indexable. Canonical top-level
+        # fields win on any key collision with ``details``; the nested
+        # ``details`` mapping is retained unchanged for compatibility.
+        record = {"schema": self._schema_version, **asdict(entry)}
+        data = {**entry.details, **record}
+        await self._storage.save_log(
+            timestamp=ts,
+            event=entry.event,
+            actor=entry.actor,
+            session_id=self._session_id,
+            data=data,
+        )
+
+
 def storage_secondary_sink(
     storage: _LogSink,
     *,
@@ -60,39 +104,9 @@ def storage_secondary_sink(
     the JSONL record — additive, and the nested ``details`` mapping is still
     present unchanged; code diffing the two streams should expect the
     superset.
+
+    ``AuditLog`` binds its own ``schema_version`` to the returned sink, so
+    the mirrored ``data["schema"]`` always equals the JSONL record's. Used
+    standalone, the sink stamps ``AUDIT_SCHEMA_VERSION``.
     """
-
-    async def _sink(entry: AuditEntry) -> None:
-        # Parse the ISO-8601 timestamp the audit pipeline emits. The
-        # sink interface wants a real datetime so the storage layer
-        # can index it. Fall back to "now" if the entry's timestamp is
-        # somehow non-parseable — failure-here cascades into "no audit
-        # row" which is worse than "audit row with slightly wrong ts".
-        try:
-            ts = datetime.fromisoformat(entry.timestamp)
-        except Exception:
-            ts = datetime.now(timezone.utc)
-        # Mirror the canonical JSONL record exactly, then promote the
-        # per-event fields out of ``details`` so nothing is dropped and
-        # the execution fields stay indexable. Canonical top-level
-        # fields win on any key collision with ``details``; the nested
-        # ``details`` mapping is retained unchanged for compatibility.
-        #
-        # ``schema`` is stamped from the module default rather than the
-        # owning ``AuditLog``'s configured ``schema_version``: the sink
-        # boundary receives only the entry, not the log. A host that
-        # overrides ``AuditLog(schema_version=...)`` would therefore see
-        # the JSONL and this mirrored row disagree; treat the module
-        # constant as authoritative for mirrored rows until the sink
-        # interface carries the version through.
-        record = {"schema": AUDIT_SCHEMA_VERSION, **asdict(entry)}
-        data = {**entry.details, **record}
-        await storage.save_log(
-            timestamp=ts,
-            event=entry.event,
-            actor=entry.actor,
-            session_id=session_id,
-            data=data,
-        )
-
-    return _sink
+    return _StorageSecondarySink(storage, session_id)

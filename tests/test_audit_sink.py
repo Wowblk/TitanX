@@ -26,6 +26,7 @@ from titanx.policy import (
     PolicyStore,
     storage_secondary_sink,
 )
+from titanx.policy.audit_log import AUDIT_SCHEMA_VERSION
 from titanx.storage.types import StorageBackend
 
 
@@ -174,6 +175,49 @@ class TestSecondarySinkFanout:
         assert data["before"]["allowed_write_paths"] == ["/a"]
         assert data["after"]["allowed_write_paths"] == ["/b"]
         assert data["details"]["execution_id"] == "exec-1"
+
+
+class TestSchemaVersionAlignment:
+    async def test_mirrored_row_matches_the_owning_logs_schema_version(self, tmp_path) -> None:
+        # ``AuditLog(schema_version=...)`` is the single source of truth for
+        # the record shape of one deployment. A mirrored row stamped with the
+        # module default would claim a different format from the JSONL line it
+        # mirrors, so a consumer joining the two streams cannot tell which
+        # schema to parse.
+        storage = _CapturingStorage()
+        log_path = tmp_path / "audit.jsonl"
+        audit = AuditLog(
+            str(log_path),
+            schema_version=7,
+            fsync_policy="every",
+            secondary_sink=storage_secondary_sink(storage, session_id="sid"),
+        )
+        await audit.append(AuditEntry(
+            timestamp="2026-10-07T12:00:00+00:00",
+            event="tool_decision",
+            actor="host",
+            reason="future format",
+        ))
+        await audit.flush()
+        await audit.aclose()
+
+        [disk] = [json.loads(line) for line in log_path.read_text().splitlines()]
+        [mirrored] = storage.calls
+        assert disk["schema"] == 7
+        assert mirrored["data"]["schema"] == 7
+
+    async def test_standalone_sink_uses_the_module_schema_version(self) -> None:
+        # The adapter is usable without an owning AuditLog (tests, custom
+        # wiring); then the module constant is the only available version.
+        storage = _CapturingStorage()
+        sink = storage_secondary_sink(storage)
+        await sink(AuditEntry(
+            timestamp="2026-10-07T12:00:00+00:00",
+            event="tool_decision",
+            actor="host",
+            reason="standalone",
+        ))
+        assert storage.calls[0]["data"]["schema"] == AUDIT_SCHEMA_VERSION
 
 
 class TestStorageBackendSaveLogDeprecation:
