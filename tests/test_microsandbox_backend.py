@@ -16,7 +16,8 @@ would let untrusted text (or a dropped field) slip through:
 
 A fake ``microsandbox`` module is injected at ``sys.modules`` (the SDK is
 imported lazily), so no real microVM — and no KVM / Apple-Silicon host — is
-needed to run these.
+needed to run these. ``tests/test_microsandbox_sdk_contract.py`` checks the
+fakes below against the installed SDK.
 """
 
 from __future__ import annotations
@@ -36,8 +37,33 @@ from titanx.sandbox.backends.microsandbox import (
 from titanx.sandbox.types import SandboxExecutionRequest, SandboxSession
 
 
+class _RecordingFs:
+    """Stand-in for ``microsandbox.SandboxFsOps`` (``Sandbox.fs``).
+
+    ``write_files`` / ``read_file`` call ``fs.write`` / ``fs.read``. Parameter
+    names match the SDK so ``tests/test_microsandbox_sdk_contract.py`` can
+    bind them.
+    """
+
+    def __init__(self) -> None:
+        self.writes: list[tuple[str, bytes]] = []
+        self.reads: list[str] = []
+
+    async def read(self, path: str) -> bytes:
+        self.reads.append(path)
+        return b""
+
+    async def write(self, path: str, data: bytes) -> None:
+        self.writes.append((path, data))
+
+
 class _RecordingSandbox:
-    """Stand-in for a running ``microsandbox.Sandbox`` / ``SandboxHandle``."""
+    """Stand-in for a running ``microsandbox.Sandbox`` / ``SandboxHandle``.
+
+    ``exec`` / ``stop`` / ``fs`` mirror the ``Sandbox`` instance returned by
+    ``Sandbox.create`` and ``Sandbox.restore``. ``snapshot`` mirrors
+    ``SandboxHandle.snapshot`` (what ``Sandbox.get`` returns).
+    """
 
     last: "_RecordingSandbox | None" = None
     snapshot_error: Exception | None = None
@@ -47,6 +73,7 @@ class _RecordingSandbox:
         self.execs: list[dict] = []
         self.stopped = False
         self.snapshot_names: list[str] = []
+        self.fs = _RecordingFs()
 
     async def snapshot(self, name: str):
         # ``SandboxHandle.snapshot`` is the live-capture API; ``Snapshot.create``
